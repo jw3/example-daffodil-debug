@@ -43,20 +43,14 @@ class MyRunner(infoset: ActorRef, variables: ActorRef) extends Actor with Stash 
     {
       case GetCommand =>
         cmdq.add("step")
-        context.become(initInfoset)
+        context.become(callInfoset)
     }
   }
 
-  def initInfoset: Receive = {
-    val buffer = new StringBuilder
-
-    {
-      case LineOutput(txt) =>
-        buffer.append(s"$txt\n")
-      case GetCommand =>
-        cmdq.add("info infoset")
-        context.become(handleInfoset)
-    }
+  def callInfoset: Receive = {
+    case GetCommand =>
+      cmdq.add("info infoset")
+      context.become(handleInfoset)
   }
 
   def handleInfoset: Receive = {
@@ -68,11 +62,11 @@ class MyRunner(infoset: ActorRef, variables: ActorRef) extends Actor with Stash 
       case GetCommand =>
         stash()
         infoset ! StepOutput(buffer.mkString)
-        context.become(initVariables)
+        context.become(callVariables)
     }
   }
 
-  def initVariables: Receive = {
+  def callVariables: Receive = {
     unstashAll()
 
     {
