@@ -8,7 +8,8 @@ object main extends App {
 
   val info = system.actorOf(Props[StepDisplay])
   val vars = system.actorOf(Props[StepDisplay])
-  val runner = system.actorOf(MyRunner.props(info, vars))
+  val data = system.actorOf(Props[StepDisplay])
+  val runner = system.actorOf(MyRunner.props(info, vars, data))
 }
 
 class StepDisplay extends Actor with ActorLogging {

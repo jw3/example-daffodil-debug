@@ -12,7 +12,7 @@ import java.util.concurrent.PriorityBlockingQueue
 import scala.concurrent.Future
 
 object MyRunner {
-  def props(infoset: ActorRef, variables: ActorRef) = Props(new MyRunner(infoset, variables))
+  def props(infoset: ActorRef, variables: ActorRef, data: ActorRef) = Props(new MyRunner(infoset, variables, data))
 
   case object GetCommand
   case class LineOutput(txt: String)
@@ -21,11 +21,11 @@ object MyRunner {
   private val repeats = Stream.continually(Seq("step", "info infoset").toStream).flatten.iterator
 }
 
-class MyRunner(infoset: ActorRef, variables: ActorRef) extends Actor with Stash with ActorLogging {
+class MyRunner(infoset: ActorRef, variables: ActorRef, data: ActorRef) extends Actor with Stash with ActorLogging {
   val cmdq = new PriorityBlockingQueue[String]
 
   val schema = getClass.getResource("/variables_01.dfdl.xsd")
-  val data = new ByteArrayInputStream("0,1,2".getBytes)
+  val input = new ByteArrayInputStream("0,1,2".getBytes)
 
   val c = Daffodil.compiler()
   val pf = c.compileSource(schema.toURI)
@@ -34,7 +34,7 @@ class MyRunner(infoset: ActorRef, variables: ActorRef) extends Actor with Stash 
   val dp = pf.onPath("/").withDebugging(true).withDebugger(new MyDebuggerRunner)
 
   Future {
-    dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(System.out, true))
+    dp.parse(new InputSourceDataInputStream(input), new XMLTextInfosetOutputter(System.out, true))
   }(context.dispatcher)
 
   def stepping: Receive = {
@@ -85,6 +85,29 @@ class MyRunner(infoset: ActorRef, variables: ActorRef) extends Actor with Stash 
       case GetCommand =>
         stash()
         variables ! StepOutput(buffer.mkString)
+        context.become(callData)
+    }
+  }
+
+  def callData: Receive = {
+    unstashAll()
+
+    {
+      case GetCommand =>
+        cmdq.add("info data")
+        context.become(handleData)
+    }
+  }
+
+  def handleData: Receive = {
+    val buffer = new StringBuilder
+
+    {
+      case LineOutput(txt) =>
+        buffer.append(s"$txt\n")
+      case GetCommand =>
+        stash()
+        data ! StepOutput(buffer.mkString)
         context.become(stepping)
     }
   }
