@@ -6,6 +6,7 @@ scalaVersion := "2.12.13"
 
 val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
+  "dev.zio" %% "zio" % "1.0.3",
   "com.typesafe.akka" %% "akka-actor-typed" % "2.6.13",
   "org.apache.daffodil" %% "daffodil-sapi" % daffodilVer,
   "org.apache.daffodil" %% "daffodil-runtime1" % daffodilVer,
