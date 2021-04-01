@@ -1,20 +1,12 @@
-package ddb.debugger
+package ddb.debugger.cmd
 
-import org.apache.daffodil.infoset._
+import ddb.debugger.Command
+import ddb.debugger.event.{InfosetEvent, NoInfoset, ViewInfosetEvent}
+import org.apache.daffodil.infoset.{DIDocument, DIElement, InfosetElement, InfosetWalker, XMLTextInfosetOutputter}
 import org.apache.daffodil.processors.parsers.PState
 import zio.ZIO
 
-object model {
-  object Step {
-    val only: Step = Step(Seq.empty)
-    val default: Step = Step(Seq(ShowInfoset))
-  }
-  case class Step(and: Seq[Command[_ <: Event]]) extends Command[StepEvent] {
-    override def run(state: PState): ZIO[Any, Throwable, StepEvent] = ZIO.foreach(and)(_.run(state)).map(StepComplete)
-  }
-  sealed trait StepEvent extends Event
-  case class StepComplete(events: Seq[Event]) extends MultiEvent with StepEvent
-
+object infoset {
   case object ShowInfoset extends Command[InfosetEvent] {
     def run(state: PState): ZIO[Any, Throwable, InfosetEvent] =
       ZIO(state.infoset).map {
@@ -36,7 +28,4 @@ object model {
       bos.toString("UTF-8")
     }
   }
-  trait InfosetEvent extends Event
-  case object NoInfoset extends InfosetEvent
-  case class ViewInfosetEvent(xml: String) extends InfosetEvent
 }

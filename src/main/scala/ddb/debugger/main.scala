@@ -1,6 +1,6 @@
 package ddb.debugger
 
-import ddb.debugger.model.Step
+import ddb.debugger.cmd.Step
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
@@ -30,7 +30,7 @@ object main extends scala.App {
     _ <- eloop.forever.fork
 
     debugger = new MyDebugger(cq, eq)
-    dp = pf.onPath("/").withDebugging(true).withDebugger(debugger)
+    dp = pf.onPath("/").withDebugger(debugger).withDebugging(true)
     _ <- IO {
       dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(System.out, true))
     }
