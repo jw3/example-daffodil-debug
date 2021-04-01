@@ -1,7 +1,7 @@
-package ddb.actor
+package ddb.runner.actor
 
 import akka.actor.{Actor, ActorLogging, ActorSystem, Props}
-import ddb.actor.MyRunner.StepOutput
+import ddb.runner.actor.MyRunner.StepOutput
 
 object main extends App {
   val system = ActorSystem()

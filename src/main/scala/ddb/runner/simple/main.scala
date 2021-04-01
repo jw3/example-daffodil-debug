@@ -1,4 +1,4 @@
-package ddb.simple
+package ddb.runner.simple
 
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter

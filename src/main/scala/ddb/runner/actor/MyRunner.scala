@@ -1,7 +1,7 @@
-package ddb.actor
+package ddb.runner.actor
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props, Stash}
-import ddb.actor.MyRunner.{GetCommand, LineOutput, StepOutput}
+import ddb.runner.actor.MyRunner.{GetCommand, LineOutput, StepOutput}
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.debugger.DebuggerRunner
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter

@@ -1,4 +1,4 @@
-package ddb.simple
+package ddb.runner.simple
 
 import org.apache.daffodil.sapi.debugger.DebuggerRunner
 

@@ -1,4 +1,4 @@
-package ddb.zio
+package ddb.runner.zio
 
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
