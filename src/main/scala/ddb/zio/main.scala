@@ -19,7 +19,7 @@ object main extends scala.App {
     q <- Queue.unbounded[String]
     runner = new MyRunner(q)
 
-    dp = pf.onPath("/").withDebugging(true).withDebugger(runner)
+    dp = pf.onPath("/").withDebugging(true).withDebuggerRunner(runner)
     pr = dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(System.out, true))
 
     loop = for {

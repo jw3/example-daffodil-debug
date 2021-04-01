@@ -31,7 +31,7 @@ class MyRunner(infoset: ActorRef, variables: ActorRef, data: ActorRef) extends A
   val pf = c.compileSource(schema.toURI)
   pf.getDiagnostics.filter(_.isError).foreach(println)
 
-  val dp = pf.onPath("/").withDebugging(true).withDebugger(new MyDebuggerRunner)
+  val dp = pf.onPath("/").withDebugging(true).withDebuggerRunner(new MyDebuggerRunner)
 
   Future {
     dp.parse(new InputSourceDataInputStream(input), new XMLTextInfosetOutputter(System.out, true))

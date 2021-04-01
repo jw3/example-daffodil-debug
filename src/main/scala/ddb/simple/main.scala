@@ -15,7 +15,7 @@ object main extends App {
   pf.getDiagnostics.filter(_.isError).foreach(println)
 
   val runner = new MyRunner()
-  val dp = pf.onPath("/").withDebugging(true).withDebugger(runner)
+  val dp = pf.onPath("/").withDebugging(true).withDebuggerRunner(runner)
 
 
   val pr = dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(System.out, true))
