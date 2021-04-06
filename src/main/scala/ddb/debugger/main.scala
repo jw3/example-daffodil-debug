@@ -1,6 +1,7 @@
 package ddb.debugger
 
 import ddb.debugger.cmd.Step
+import ddb.debugger.cmd.data.BitPosEvent
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
@@ -10,7 +11,7 @@ import java.io.ByteArrayInputStream
 
 object main extends scala.App {
   val schema = getClass.getResource("/sch01.dfdl.xsd")
-  val data = new ByteArrayInputStream("12345".getBytes)
+  val bytes = "012345".getBytes
 
   val c = Daffodil.compiler()
   val pf = c.compileSource(schema.toURI)
@@ -22,17 +23,24 @@ object main extends scala.App {
     _ <- cq.offer(Step.default) // todo;; autostepping for demo
 
     eloop = for {
-      msg <- eq.take
+      e <- eq.take
       _ <- cq.offer(Step.default) // todo;; autostepping for demo
-    } yield {
-      println(msg)
+    } yield e match {
+      case BitPosEvent(pos) =>
+        val c = pos.toInt / 8 - 1
+        val ch = bytes(c).toChar
+        println(s"$e => value: $ch")
+      case _                => println(e)
     }
     _ <- eloop.forever.fork
 
     debugger = new MyDebugger(cq, eq)
     dp = pf.onPath("/").withDebugger(debugger).withDebugging(true)
     _ <- IO {
-      dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(System.out, true))
+      dp.parse(
+        new InputSourceDataInputStream(new ByteArrayInputStream(bytes)),
+        new XMLTextInfosetOutputter(System.out, true)
+      )
     }
   } yield ()
 
