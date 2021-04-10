@@ -1,9 +1,9 @@
-package ddb.debugger
+package ddb.debugger.z
 
-import ddb.debugger.cmd.Step
+import ddb.debugger.api.{Command, Event, MultiEvent, Step}
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.processors.parsers.{PState, Parser}
-import zio.{Queue, ZIO}
+import zio._
 
 class MyDebugger(cmd: Queue[Command[_]], ev: Queue[Event]) extends Debugger {
   private val rt = zio.Runtime.default

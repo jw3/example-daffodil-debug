@@ -1,11 +1,10 @@
-package ddb.debugger
+package ddb.debugger.z
 
-import ddb.debugger.cmd.Step
-import ddb.debugger.cmd.data.BitPosEvent
+import ddb.debugger.api.{BitPosEvent, Command, Event, Step}
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
-import zio._
+import zio.{IO, Queue, Runtime}
 
 import java.io.ByteArrayInputStream
 
@@ -30,7 +29,7 @@ object main extends scala.App {
         val c = pos.toInt / 8 - 1
         val ch = bytes(c).toChar
         println(s"$e => value: $ch")
-      case _                => println(e)
+      case _ => println(e)
     }
     _ <- eloop.forever.fork
 
