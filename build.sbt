@@ -4,7 +4,7 @@ version := "0.1"
 
 scalaVersion := "2.12.13"
 
-val zioVer = "1.0.5+80-dac231cd-SNAPSHOT"
+val zioVer = "1.0.5+95-a4574e97-SNAPSHOT"
 val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
   "dev.zio" %% "zio" % zioVer,
