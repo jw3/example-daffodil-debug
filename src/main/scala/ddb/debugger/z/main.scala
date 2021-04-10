@@ -1,10 +1,13 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.{BitPosEvent, Command, Event, Step}
+import ddb.debugger.api.{Command, Event, Step}
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
-import zio.{IO, Queue, Runtime}
+import zio._
+import zio.console._
+import zio.duration.durationInt
+import zio.stream._
 
 import java.io.ByteArrayInputStream
 
@@ -17,23 +20,18 @@ object main extends scala.App {
   pf.getDiagnostics.filter(_.isError).foreach(println)
 
   val app = for {
-    eq <- Queue.unbounded[Event]
     cq <- Queue.unbounded[Command[_]]
-    _ <- cq.offer(Step.default) // todo;; autostepping for demo
+    es <- Queue.unbounded[Event]
 
-    eloop = for {
-      e <- eq.take
-      _ <- cq.offer(Step.default) // todo;; autostepping for demo
-    } yield e match {
-      case BitPosEvent(pos) =>
-        val c = pos.toInt / 8 - 1
-        val ch = bytes(c).toChar
-        println(s"$e => value: $ch")
-      case _ => println(e)
-    }
-    _ <- eloop.forever.fork
+    mc = MyControl(cq)
+    _ <- mc.step()
+    _ <- mc.run(Stream.fromQueue(es)).fork
 
-    debugger = new MyDebugger(cq, eq)
+    //      _ <- mc.run(Stream.fromHub(es)).forever.fork
+//    _ <- MyInfoSetDisplay().run(Stream.fromQueue(es)).forever.fork
+//    _ <- MyBitPosDisplay().run(Stream.fromQueue(es)).forever.fork
+
+    debugger = new MyDebugger(Stream.fromQueue(cq), es)
     dp = pf.onPath("/").withDebugger(debugger).withDebugging(true)
     _ <- IO {
       dp.parse(
@@ -41,6 +39,7 @@ object main extends scala.App {
         new XMLTextInfosetOutputter(System.out, true)
       )
     }
+
   } yield ()
 
   Runtime.default.unsafeRun(app)
