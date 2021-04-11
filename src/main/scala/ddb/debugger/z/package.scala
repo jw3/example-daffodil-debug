@@ -1,12 +1,12 @@
 package ddb.debugger
 
 import ddb.debugger.api.{Command, Event}
-import zio.{Hub, Queue}
 import zio.stream.ZStream
+import zio.{Hub, Queue}
 
 package object z {
-  type EProducer = Queue[Event]
+  type EProducer = Hub[Event]
   type CProducer = Queue[Command[_]]
   type EStream = ZStream[Any, Nothing, Event]
-  type CStream = ZStream[Any, Nothing, Command[_]]
+  type CStream = Queue[Command[_]]
 }

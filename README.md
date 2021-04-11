@@ -5,6 +5,10 @@ examples of extending the debugging capability in Daffodil
 
 using unmodified Daffodil from master
 
+### examples
+- [Custom Daffodil Debugger using Zio](src/main/scala/ddb/debugger/z)
+- 
+
 ### model
 
 - Producers send [`Command[E]`](src/main/scala/ddb/debugger/package.scala)

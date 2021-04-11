@@ -5,12 +5,16 @@ import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import zio._
-import zio.console._
 import zio.duration.durationInt
 import zio.stream._
 
 import java.io.ByteArrayInputStream
 
+/**
+ * execute a debugging session
+ * simulate receiving step commands from an input control
+ * output debugging state info to simulated displays
+ */
 object main extends scala.App {
   val schema = getClass.getResource("/sch01.dfdl.xsd")
   val bytes = "012345".getBytes
@@ -21,18 +25,24 @@ object main extends scala.App {
 
   val app = for {
     cq <- Queue.unbounded[Command[_]]
-    es <- Queue.unbounded[Event]
+    es <- Hub.unbounded[Event]
 
+    // simulate an input control
     mc = MyControl(cq)
-    _ <- mc.step()
-    _ <- mc.run(Stream.fromQueue(es)).fork
+    _ <- mc.run(Stream.fromHub(es)).fork
 
-    //      _ <- mc.run(Stream.fromHub(es)).forever.fork
-//    _ <- MyInfoSetDisplay().run(Stream.fromQueue(es)).forever.fork
-//    _ <- MyBitPosDisplay().run(Stream.fromQueue(es)).forever.fork
+    // simulate some output views
+    _ <- MyInfoSetDisplay().run(Stream.fromHub(es)).fork
+    _ <- MyBitPosDisplay().run(Stream.fromHub(es)).fork
 
-    debugger = new MyDebugger(Stream.fromQueue(cq), es)
-    dp = pf.onPath("/").withDebugger(debugger).withDebugging(true)
+    // simulate steps every 2 seconds
+    stepper = ZIO.sleep(2000.millis) *> mc.step()
+    _ <- stepper.forever.fork
+
+    // the debugger gets the command queue and event stream
+    dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)
+
+    // the program will end when the parsing IO completes
     _ <- IO {
       dp.parse(
         new InputSourceDataInputStream(new ByteArrayInputStream(bytes)),

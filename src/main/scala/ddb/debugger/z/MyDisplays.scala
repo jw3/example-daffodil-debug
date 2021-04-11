@@ -10,14 +10,14 @@ import zio.console.putStrLn
   */
 case class MyInfoSetDisplay() {
   def run(es: EStream) = es.foreach {
-    case ViewInfosetEvent(xml) => putStrLn(xml)
+    case ViewInfosetEvent(xml) => putStrLn(s"[MyInfosSetDisplay] $xml")
     case _                     => ZIO.unit
   }
 }
 
 case class MyBitPosDisplay() {
   def run(es: EStream) = es.foreach {
-    case e @ BitPosEvent(_) => putStrLn(s"$e")
+    case e @ BitPosEvent(_) => putStrLn(s"[MyBitPosDisplay] $e")
     case _                  => ZIO.unit
   }
 }
