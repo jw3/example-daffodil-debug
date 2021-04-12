@@ -1,15 +1,23 @@
 daffodil debugger experiments
 ===
 
-examples of extending the debugging capability in Daffodil
+Examples of extending the debugging capability in Daffodil using a new protocol that follows in the footsteps of the Daffodil TUI debugger.
 
-using unmodified Daffodil from master
+Uses a snapshot from the current Daffodil master branch.
 
 ### examples
 - [Custom Daffodil Debugger using Zio](src/main/scala/ddb/debugger/z)
-- 
+  - simulates a stepping control that injects a step command that moves the debugger to the next step
+  - stateless views
+    - display infoset at the current step
+    - display the current bit position in the data and the corresponding value
+  - stateful views
+    - display the diff of current infoset against previous step
+    
 
 ### model
+
+Commands applied to the current ParseState produce Events.
 
 - Producers send [`Command[E]`](src/main/scala/ddb/debugger/package.scala)
 ```
