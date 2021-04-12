@@ -13,7 +13,7 @@ Uses a snapshot from the current Daffodil master branch.
     - display the current bit position in the data and the corresponding value
   - stateful views
     - display the diff of current infoset against previous step
-    
+  - integrates scalafx gui to inject manual control and feedback
 
 ### model
 

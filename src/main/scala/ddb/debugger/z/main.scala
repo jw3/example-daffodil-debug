@@ -1,6 +1,6 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.{Command, Event, Step}
+import ddb.debugger.api.{Command, Event}
 import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
@@ -11,10 +11,10 @@ import zio.stream._
 import java.io.ByteArrayInputStream
 
 /**
- * execute a debugging session
- * simulate receiving step commands from an input control
- * output debugging state info to simulated displays
- */
+  * execute a debugging session
+  * simulate receiving step commands from an input control
+  * output debugging state info to simulated displays
+  */
 object main extends scala.App {
   val schema = getClass.getResource("/sch01.dfdl.xsd")
   val bytes = "012345".getBytes
@@ -39,9 +39,9 @@ object main extends scala.App {
     prev <- Ref.make("")
     _ <- MyDiffingInfoSetDisplay(prev).run(Stream.fromHub(es)).fork
 
-    // simulate steps every 2 seconds
-    stepper = ZIO.sleep(2000.millis) *> mc.step()
-    _ <- stepper.forever.fork
+    // USER INPUT: use the gui or else simulate steps every 2 seconds
+    stepper = if (args.contains("gui")) gui.run(cq) else mc.step().delay(2000.millis).forever
+    _ <- stepper.fork
 
     // the debugger gets the command queue and event stream
     dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)
