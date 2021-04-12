@@ -9,6 +9,7 @@ val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
   "dev.zio" %% "zio" % zioVer,
   "dev.zio" %% "zio-streams" % zioVer,
+  "io.github.java-diff-utils" % "java-diff-utils" % "4.9",
   "com.typesafe.akka" %% "akka-actor-typed" % "2.6.13",
   "org.apache.daffodil" %% "daffodil-sapi" % daffodilVer,
   "org.apache.daffodil" %% "daffodil-runtime1" % daffodilVer,

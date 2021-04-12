@@ -21,7 +21,7 @@ class MyDebugger(cs: CStream, es: EProducer) extends Debugger {
     rt.unsafeRunSync(cs.take.flatMap {
       case s @ Step(_) =>
         s.run(state)
-          .tap(e => putStrLn(s"RUNNING $e"))
+          .tap(e => putStrLn(s"===== Stepping ====="))
           .flatMap {
             case e: MultiEvent => es.publishAll(e.events()) *> es.publish(e)
             case e             => es.publish(e)

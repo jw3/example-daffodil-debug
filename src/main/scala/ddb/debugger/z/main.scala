@@ -35,6 +35,10 @@ object main extends scala.App {
     _ <- MyInfoSetDisplay().run(Stream.fromHub(es)).fork
     _ <- MyBitPosDisplay().run(Stream.fromHub(es)).fork
 
+    // simulate a view that maintains state
+    prev <- Ref.make("")
+    _ <- MyDiffingInfoSetDisplay(prev).run(Stream.fromHub(es)).fork
+
     // simulate steps every 2 seconds
     stepper = ZIO.sleep(2000.millis) *> mc.step()
     _ <- stepper.forever.fork
