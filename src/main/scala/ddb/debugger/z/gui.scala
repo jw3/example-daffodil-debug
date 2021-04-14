@@ -4,12 +4,13 @@ import ddb.debugger.api.Step
 import scalafx.Includes._
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
+import scalafx.scene.control.TextArea
 import scalafx.scene.paint.Color._
 import scalafx.scene.shape.Rectangle
 import zio.IO
 
 object gui {
-  def run(cq: CProducer) =
+  def run(cq: CProducer, infosetCtl: ControlProvider[TextArea]) =
     for {
       _ <- IO {
         val jfxApp = new JFXApp {
@@ -21,9 +22,9 @@ object gui {
             height = 450
             scene = new Scene {
               fill = LightGreen
-              content = new Rectangle {
+              val button = new Rectangle {
                 x = 25
-                y = 40
+                y = 240
                 width = 100
                 height = 100
                 fill <== when(hover) choose Green otherwise Red
@@ -32,6 +33,8 @@ object gui {
                     cq.offer(Step.default)
                   )
               }
+
+              content = List(button, infosetCtl.control)
             }
           }
         }

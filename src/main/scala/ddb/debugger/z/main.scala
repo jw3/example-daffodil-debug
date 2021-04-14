@@ -32,7 +32,8 @@ object main extends scala.App {
     _ <- mc.run(Stream.fromHub(es)).fork
 
     // simulate some output views
-    _ <- MyInfoSetDisplay().run(Stream.fromHub(es)).fork
+    infosetView = MyInfoSetDisplay()
+    _ <- infosetView.run(Stream.fromHub(es)).fork
     _ <- MyBitPosDisplay().run(Stream.fromHub(es)).fork
 
     // simulate a view that maintains state
@@ -40,7 +41,7 @@ object main extends scala.App {
     _ <- MyDiffingInfoSetDisplay(prev).run(Stream.fromHub(es)).fork
 
     // USER INPUT: use the gui or else simulate steps every 2 seconds
-    stepper = if (args.contains("gui")) gui.run(cq) else mc.step().delay(2000.millis).forever
+    stepper = if (args.contains("gui")) gui.run(cq, infosetView) else mc.step().delay(2000.millis).forever
     _ <- stepper.fork
 
     // the debugger gets the command queue and event stream
