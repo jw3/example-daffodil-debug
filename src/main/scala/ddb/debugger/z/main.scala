@@ -17,7 +17,7 @@ import java.io.ByteArrayInputStream
   */
 object main extends scala.App {
   val schema = getClass.getResource("/sch01.dfdl.xsd")
-  val bytes = "012345".getBytes
+  val bytes = "9876543210".getBytes
 
   val c = Daffodil.compiler()
   val pf = c.compileSource(schema.toURI)
@@ -34,15 +34,16 @@ object main extends scala.App {
     // simulate some output views
     infosetView = MyInfoSetDisplay()
     _ <- infosetView.run(Stream.fromHub(es)).fork
-    _ <- MyBitPosDisplay().run(Stream.fromHub(es)).fork
+    bitposView = MyBitPosDisplay(bytes)
+    _ <- bitposView.run(Stream.fromHub(es)).fork
 
     // simulate a view that maintains state
     prev <- Ref.make("")
-    _ <- MyDiffingInfoSetDisplay(prev).run(Stream.fromHub(es)).fork
+    differ = MyDiffingInfoSetDisplay(prev)
+    _ <- differ.run(Stream.fromHub(es)).fork
 
-    // USER INPUT: use the gui or else simulate steps every 2 seconds
-    stepper = if (args.contains("gui")) gui.run(cq, infosetView) else mc.step().delay(2000.millis).forever
-    _ <- stepper.fork
+    // fork off the gui
+    _ <- gui.run(cq, infosetView, bitposView, differ).fork
 
     // the debugger gets the command queue and event stream
     dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)

@@ -2,9 +2,15 @@ package ddb.debugger
 
 import org.apache.daffodil.infoset._
 import org.apache.daffodil.processors.parsers.PState
+import scalafx.scene.control.Control
 import zio.ZIO
 
 object api {
+  // gui mockup only
+  trait ControlProvider {
+    def control: Control
+  }
+
   // a command operating on the state produces an event
   // Command(state) => Event
   trait Command[E <: Event] {

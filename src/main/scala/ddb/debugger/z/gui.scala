@@ -1,16 +1,15 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.Step
+import ddb.debugger.api.{ControlProvider, Step}
 import scalafx.Includes._
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
-import scalafx.scene.control.TextArea
 import scalafx.scene.paint.Color._
 import scalafx.scene.shape.Rectangle
 import zio.IO
 
 object gui {
-  def run(cq: CProducer, infosetCtl: ControlProvider[TextArea]) =
+  def run(cq: CProducer, myctls: ControlProvider*) =
     for {
       _ <- IO {
         val jfxApp = new JFXApp {
@@ -34,7 +33,7 @@ object gui {
                   )
               }
 
-              content = List(button, infosetCtl.control)
+              content = myctls.map(_.control) :+ button
             }
           }
         }
