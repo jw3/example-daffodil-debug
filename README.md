@@ -31,6 +31,10 @@ trait Event
 ```
 - Sinks and Producers are not connected
 
+### it is what it is
+
+![](doc/img.png)
+
 ### reference
 - https://github.com/apache/daffodil
 - https://github.com/DFDLSchemas/JPEG
