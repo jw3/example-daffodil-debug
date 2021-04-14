@@ -31,7 +31,7 @@ case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
   lazy val control: TextField = new TextField {
     layoutX = 300
     layoutY = 0
-    prefWidth = 300
+    prefWidth = 350
     prefHeight = 25
   }
 
@@ -49,7 +49,7 @@ case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider
   lazy val control: TextArea = new TextArea {
     layoutX = 300
     layoutY = 25
-    prefWidth = 300
+    prefWidth = 350
     prefHeight = 275
   }
 
@@ -60,7 +60,7 @@ case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider
         diff <- IO {
           DiffUtils.diff(prev.linesIterator.toSeq.asJava, xml.linesIterator.toSeq.asJava).toString
         }
-        _ <- IO { control.text = diff }
+        _ <- IO { control.text = diff.replaceAll("""([\[\]])""", "$1\n") }
       } yield ()
     case _ => ZIO.unit
   }
