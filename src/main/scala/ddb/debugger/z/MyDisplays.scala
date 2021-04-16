@@ -2,7 +2,6 @@ package ddb.debugger.z
 
 import com.github.difflib.DiffUtils
 import ddb.debugger.api.{BitPosEvent, ControlProvider, ViewInfosetEvent}
-import scalafx.scene.control
 import scalafx.scene.control.{TextArea, TextField}
 import zio._
 
@@ -35,13 +34,19 @@ case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
     prefHeight = 25
   }
 
-  def run(es: EStream) = es.foreach {
-    case e @ BitPosEvent(pos) =>
-      val c = pos.toInt / 8 - 1
-      val ch = input(c).toChar
-      IO { control.text = s"$e = $ch" }
-    case _                  => ZIO.unit
-  }
+  def run(es: EStream) =
+    es.foreach {
+        case BitPosEvent(pos) =>
+          IO {
+            val bytePos = pos.toInt / 8
+            val txt = input
+              .slice(bytePos - 4, bytePos + 5)
+              .foldLeft(s"[$pos] ")((r, b) => String.format(s"$r %02x", Byte.box(b)))
+            control.text = txt
+          }
+        case _ => ZIO.unit
+      }
+      .mapError(_ => IO { control.text = "err" })
 }
 
 // a stateful consumer
