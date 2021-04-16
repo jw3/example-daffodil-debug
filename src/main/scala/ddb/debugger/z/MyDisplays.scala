@@ -1,7 +1,7 @@
 package ddb.debugger.z
 
 import com.github.difflib.DiffUtils
-import ddb.debugger.api.{BitPosEvent, ControlProvider, ViewInfosetEvent}
+import ddb.debugger.api.{BitPosEvent, ControlProvider, PathEvent, ViewInfosetEvent}
 import scalafx.scene.control.{TextArea, TextField}
 import zio._
 
@@ -11,7 +11,6 @@ import scala.collection.JavaConverters._
   * represents displays such as GUI panels that would receive events, likely filtering from the overall
   * stream of events and do something with them without responding with commands
   */
-
 case class MyInfoSetDisplay() extends ControlProvider {
   lazy val control: TextArea = new TextArea {
     layoutX = 0
@@ -46,16 +45,30 @@ case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
           }
         case _ => ZIO.unit
       }
-      .mapError(_ => IO { control.text = "err" })
+}
+
+case class MyPathDisplay() extends ControlProvider {
+  lazy val control: TextArea = new TextArea {
+    layoutX = 300
+    layoutY = 25
+    prefWidth = 350
+    prefHeight = 200
+  }
+
+  def run(es: EStream) =
+    es.foreach {
+        case PathEvent(path) => IO { control.text = path.replaceAll("""::""", "::\n") }
+        case _               => ZIO.unit
+      }
 }
 
 // a stateful consumer
 case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider {
   lazy val control: TextArea = new TextArea {
     layoutX = 300
-    layoutY = 25
+    layoutY = 225
     prefWidth = 350
-    prefHeight = 275
+    prefHeight = 150
   }
 
   def run(es: EStream) = es.foreach {

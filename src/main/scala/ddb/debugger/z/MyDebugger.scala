@@ -2,9 +2,9 @@ package ddb.debugger.z
 
 import ddb.debugger.api.{MultiEvent, Step}
 import org.apache.daffodil.debugger.Debugger
+import org.apache.daffodil.processors.Processor
 import org.apache.daffodil.processors.parsers.{PState, Parser}
 import zio._
-import zio.console.putStrLn
 
 class MyDebugger(cs: CStream, es: EProducer) extends Debugger {
   private val rt = zio.Runtime.default
@@ -12,22 +12,23 @@ class MyDebugger(cs: CStream, es: EProducer) extends Debugger {
   override def init(state: PState, processor: Parser): Unit = println("[init]")
   override def fini(processor: Parser): Unit = println("[fini]")
 
-  override def endElement(state: PState, processor: Parser): Unit = step(state)
+  // todo;; there may need to be tie-in to the other hooks in the Debugger interface
+  //        look in the interactive debugger to see where and when the others are used
+  override def endElement(state: PState, processor: Parser): Unit = step(state, processor)
 
   /**
     * we control the debug process with a syncronous flow of commands that produce events
     */
-  def step(state: PState) =
+  def step(state: PState, processor: Processor) =
     rt.unsafeRunSync(cs.take.flatMap {
       case s @ Step(_) =>
-        s.run(state)
+
+        s.run(state, processor)
           //.tap(e => putStrLn(s"===== Stepping ====="))
           .flatMap {
             case e: MultiEvent => es.publishAll(e.events()) *> es.publish(e)
             case e             => es.publish(e)
           }
-      case _ =>
-        println("NOT RUNNING")
-        ZIO.succeed()
+      case _ => ZIO.unit
     })
 }

@@ -36,14 +36,16 @@ object main extends scala.App {
     _ <- infosetView.run(Stream.fromHub(es)).fork
     bitposView = MyBitPosDisplay(bytes)
     _ <- bitposView.run(Stream.fromHub(es)).fork
+    pathView = MyPathDisplay()
+    _ <- pathView.run(Stream.fromHub(es)).fork
 
     // simulate a view that maintains state
     prev <- Ref.make("")
     differ = MyDiffingInfoSetDisplay(prev)
     _ <- differ.run(Stream.fromHub(es)).fork
 
-    // fork off the gui
-    _ <- gui.run(cq, infosetView, bitposView, differ).fork
+    // fork off the gui with all the views
+    _ <- gui.run(cq, infosetView, bitposView, differ, pathView).fork
 
     // the debugger gets the command queue and event stream
     dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)

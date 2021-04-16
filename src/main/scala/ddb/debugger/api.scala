@@ -1,6 +1,7 @@
 package ddb.debugger
 
 import org.apache.daffodil.infoset._
+import org.apache.daffodil.processors.Processor
 import org.apache.daffodil.processors.parsers.PState
 import scalafx.scene.control.Control
 import zio.ZIO
@@ -14,7 +15,7 @@ object api {
   // a command operating on the state produces an event
   // Command(state) => Event
   trait Command[E <: Event] {
-    def run(state: PState): ZIO[Any, Throwable, E]
+    def run(state: PState, processor: Processor): ZIO[Any, Throwable, E]
   }
   trait Event
   trait MultiEvent extends Event {
@@ -24,23 +25,33 @@ object api {
   // --------------------------------------
   object Step {
     val only: Step = Step(Seq.empty)
-    val default: Step = Step(Seq(BitPosition, ShowInfoset))
+    val default: Step = Step(Seq(BitPosition, ShowInfoset, ShowPath))
   }
   case class Step(and: Seq[Command[_ <: Event]]) extends Command[StepEvent] {
-    override def run(state: PState): ZIO[Any, Throwable, StepEvent] = ZIO.foreach(and)(_.run(state)).map(StepComplete)
+    override def run(state: PState, processor: Processor): ZIO[Any, Throwable, StepEvent] =
+      ZIO.foreach(and)(_.run(state, processor)).map(StepComplete)
   }
 
   // --------------------------------------
 
   case object BitPosition extends Command[BitPosEvent] {
-    def run(state: PState): ZIO[Any, Throwable, BitPosEvent] =
+    def run(state: PState, processor: Processor): ZIO[Any, Throwable, BitPosEvent] =
       ZIO(state.bitPos0b).map(BitPosEvent)
   }
   case class BitPosEvent(pos: Long) extends Event
 
+  // ---------------------------------------
+
+  case object ShowPath extends Command[PathEvent] {
+    def run(state: PState, processor: Processor): ZIO[Any, Throwable, PathEvent] =
+      ZIO(processor.context.path).map(PathEvent)
+  }
+  case class PathEvent(path: String) extends Event
+
+  // ---------------------------------------
 
   case object ShowInfoset extends Command[InfosetEvent] {
-    def run(state: PState): ZIO[Any, Throwable, InfosetEvent] =
+    def run(state: PState, processor: Processor): ZIO[Any, Throwable, InfosetEvent] =
       ZIO(state.infoset).map {
         case d: DIDocument if d.contents.isEmpty => NoInfoset
         case node                                => ViewInfosetEvent(infosetToString(node))
