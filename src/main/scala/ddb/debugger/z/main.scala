@@ -16,8 +16,8 @@ import java.io.ByteArrayInputStream
   * output debugging state info to simulated displays
   */
 object main extends scala.App {
-  val schema = getClass.getResource("/sch01.dfdl.xsd")
-  val bytes = "9876543210".getBytes
+  val schema = getClass.getResource("/com/mitre/jpeg/xsd/jpeg.dfdl.xsd")
+  val bytes = getClass.getResourceAsStream("/works.jpg").readAllBytes()
 
   val c = Daffodil.compiler()
   val pf = c.compileSource(schema.toURI)
