@@ -2,6 +2,7 @@ package ddb.debugger.z
 
 import com.github.difflib.DiffUtils
 import ddb.debugger.api.{BitPosEvent, ControlProvider, PathEvent, ViewInfosetEvent}
+import scalafx.application.Platform.runLater
 import scalafx.scene.control.{TextArea, TextField}
 import zio._
 
@@ -20,7 +21,7 @@ case class MyInfoSetDisplay() extends ControlProvider {
   }
 
   def run(es: EStream) = es.foreach {
-    case ViewInfosetEvent(xml) => IO { control.text = xml }
+    case ViewInfosetEvent(xml) => IO { runLater(control.text = xml) }
     case _                     => ZIO.unit
   }
 }
@@ -35,16 +36,16 @@ case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
 
   def run(es: EStream) =
     es.foreach {
-        case BitPosEvent(pos) =>
-          IO {
-            val bytePos = pos.toInt / 8
-            val txt = input
-              .slice(bytePos - 4, bytePos + 5)
-              .foldLeft(s"[$pos] ")((r, b) => String.format(s"$r %02x", Byte.box(b)))
-            control.text = txt
-          }
-        case _ => ZIO.unit
-      }
+      case BitPosEvent(pos) =>
+        IO {
+          val bytePos = pos.toInt / 8
+          val txt = input
+            .slice(bytePos - 4, bytePos + 5)
+            .foldLeft(s"[$pos] ")((r, b) => String.format(s"$r %02x", Byte.box(b)))
+          runLater(control.text = txt)
+        }
+      case _ => ZIO.unit
+    }
 }
 
 case class MyPathDisplay() extends ControlProvider {
@@ -57,9 +58,13 @@ case class MyPathDisplay() extends ControlProvider {
 
   def run(es: EStream) =
     es.foreach {
-        case PathEvent(path) => IO { control.text = path.replaceAll("""::""", "::\n") }
-        case _               => ZIO.unit
-      }
+      case PathEvent(path) =>
+        IO {
+          val txt = path.replaceAll("""::""", "::\n")
+          runLater(control.text = txt)
+        }
+      case _ => ZIO.unit
+    }
 }
 
 // a stateful consumer
@@ -78,7 +83,10 @@ case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider
         diff <- IO {
           DiffUtils.diff(prev.linesIterator.toSeq.asJava, xml.linesIterator.toSeq.asJava).toString
         }
-        _ <- IO { control.text = diff.replaceAll("""([\[\]])""", "$1\n") }
+        _ <- IO {
+          val txt = diff.replaceAll("""([\[\]])""", "$1\n")
+          runLater(control.text = txt)
+        }
       } yield ()
     case _ => ZIO.unit
   }
