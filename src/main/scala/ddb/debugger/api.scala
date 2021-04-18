@@ -1,10 +1,10 @@
 package ddb.debugger
 
 import org.apache.daffodil.infoset._
-import org.apache.daffodil.processors.Processor
 import org.apache.daffodil.processors.parsers.PState
+import org.apache.daffodil.processors._
 import scalafx.scene.control.Control
-import zio.ZIO
+import zio.{IO, ZIO}
 
 object api {
   // gui mockup only
@@ -25,7 +25,7 @@ object api {
   // --------------------------------------
   object Step {
     val only: Step = Step(Seq.empty)
-    val default: Step = Step(Seq(BitPosition, ShowInfoset, ShowPath))
+    val default: Step = Step(Seq(BitPosition, ShowInfoset, ShowPath, ShowVariables))
   }
   case class Step(and: Seq[Command[_ <: Event]]) extends Command[StepEvent] {
     override def run(state: PState, processor: Processor): ZIO[Any, Throwable, StepEvent] =
@@ -47,6 +47,38 @@ object api {
       ZIO(processor.context.path).map(PathEvent)
   }
   case class PathEvent(path: String) extends Event
+
+  // ---------------------------------------
+
+  case object ShowVariables extends Command[VariablesEvent] {
+    def run(state: PState, processor: Processor): ZIO[Any, Throwable, VariablesEvent] = {
+      IO {
+        val vmap = state.variableMap
+        val txt = vmap.qnames.sortBy { _.toPrettyString }.foldLeft(Seq.empty[String]) { (r, v) =>
+          val instance = vmap.find(v).get
+          val debugVal = variableInstanceToDebugString(instance)
+          r :+ "  %s: %s".format(v.toPrettyString, debugVal)
+        }
+        VariablesEvent(txt.mkString("\n"))
+      }
+    }
+
+
+    def variableInstanceToDebugString(vinst: VariableInstance): String = {
+      val state = vinst.state match {
+        case VariableDefined => "default"
+        case VariableRead => "read"
+        case VariableSet => "set"
+        case VariableUndefined => "undefined"
+        case VariableBeingDefined => "being defined"
+        case VariableInProcess => "in process"
+      }
+
+      if (vinst.value.isEmpty) "(%s)".format(state)
+      else "%s (%s)".format(vinst.value.value, state)
+    }
+  }
+  case class VariablesEvent(path: String) extends Event
 
   // ---------------------------------------
 

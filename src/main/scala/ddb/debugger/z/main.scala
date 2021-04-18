@@ -5,7 +5,6 @@ import org.apache.daffodil.sapi.Daffodil
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import zio._
-import zio.duration.durationInt
 import zio.stream._
 
 import java.io.ByteArrayInputStream
@@ -38,6 +37,8 @@ object main extends scala.App {
     _ <- bitposView.run(Stream.fromHub(es)).fork
     pathView = MyPathDisplay()
     _ <- pathView.run(Stream.fromHub(es)).fork
+    varsView = MyVariablesDisplay()
+    _ <- varsView.run(Stream.fromHub(es)).fork
 
     // simulate a view that maintains state
     prev <- Ref.make("")
@@ -45,7 +46,7 @@ object main extends scala.App {
     _ <- differ.run(Stream.fromHub(es)).fork
 
     // fork off the gui with all the views
-    _ <- gui.run(cq, infosetView, bitposView, differ, pathView).fork
+    _ <- gui.run(cq, infosetView, bitposView, differ, pathView, varsView).fork
 
     // the debugger gets the command queue and event stream
     dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)

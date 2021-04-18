@@ -1,7 +1,7 @@
 package ddb.debugger.z
 
 import com.github.difflib.DiffUtils
-import ddb.debugger.api.{BitPosEvent, ControlProvider, PathEvent, ViewInfosetEvent}
+import ddb.debugger.api._
 import scalafx.application.Platform.runLater
 import scalafx.scene.control.{TextArea, TextField}
 import zio._
@@ -53,7 +53,7 @@ case class MyPathDisplay() extends ControlProvider {
     layoutX = 300
     layoutY = 25
     prefWidth = 350
-    prefHeight = 200
+    prefHeight = 100
   }
 
   def run(es: EStream) =
@@ -67,13 +67,31 @@ case class MyPathDisplay() extends ControlProvider {
     }
 }
 
+case class MyVariablesDisplay() extends ControlProvider {
+  lazy val control: TextArea = new TextArea {
+    layoutX = 300
+    layoutY = 125
+    prefWidth = 350
+    prefHeight = 125
+  }
+
+  def run(es: EStream) =
+    es.foreach {
+      case VariablesEvent(txt) =>
+        IO {
+          runLater(control.text = txt)
+        }
+      case _ => ZIO.unit
+    }
+}
+
 // a stateful consumer
 case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider {
   lazy val control: TextArea = new TextArea {
     layoutX = 300
-    layoutY = 225
+    layoutY = 250
     prefWidth = 350
-    prefHeight = 150
+    prefHeight = 125
   }
 
   def run(es: EStream) = es.foreach {

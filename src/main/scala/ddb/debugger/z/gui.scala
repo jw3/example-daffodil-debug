@@ -1,14 +1,13 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.{ControlProvider, Step}
-import scalafx.Includes._
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
 import scalafx.scene.control.{Button, ToggleButton}
 import scalafx.scene.image.{Image, ImageView}
 import scalafx.scene.paint.Color._
+import zio.IO
 import zio.duration.durationInt
-import zio.{IO, Schedule}
 
 object gui {
   def run(cq: CProducer, myctls: ControlProvider*) =
