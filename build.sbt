@@ -2,6 +2,7 @@ name := "daffodil-debugger"
 
 version := "0.1"
 
+javacOptions ++= Seq("-source", "11")
 scalaVersion := "2.12.13"
 
 val zioVer = "1.0.6"
