@@ -2,6 +2,7 @@ name := "daffodil-debugger"
 
 version := "0.1"
 
+javacOptions ++= Seq("-source", "11")
 scalaVersion := "2.12.13"
 
 val zioVer = "1.0.6"
@@ -14,8 +15,23 @@ libraryDependencies := Seq(
   "com.typesafe.akka" %% "akka-actor-typed" % "2.6.13",
   "org.apache.daffodil" %% "daffodil-sapi" % daffodilVer,
   "org.apache.daffodil" %% "daffodil-runtime1" % daffodilVer,
-  "ch.qos.logback" % "logback-classic" % "1.2.3",
+  "ch.qos.logback" % "logback-classic" % "1.2.3"
 )
 
-lazy val jfx = Seq("base", "controls", "fxml", "graphics", "media", "swing")
-libraryDependencies ++= jfx.map(mod => "org.openjfx" % s"javafx-$mod" % "14.0.1" classifier "linux")
+
+// portable config from the quickstart
+// http://www.scalafx.org/docs/quickstart/
+lazy val javaFXModules = {
+  // Determine OS version of JavaFX binaries
+  lazy val osName = System.getProperty("os.name") match {
+    case n if n.startsWith("Linux")   => "linux"
+    case n if n.startsWith("Mac")     => "mac"
+    case n if n.startsWith("Windows") => "win"
+    case _ =>
+      throw new Exception("Unknown platform!")
+  }
+  // Create dependencies for JavaFX modules
+  Seq("base", "controls", "fxml", "graphics", "media", "swing")
+    .map(m => "org.openjfx" % s"javafx-$m" % "14.0.1" classifier osName)
+}
+libraryDependencies ++= javaFXModules

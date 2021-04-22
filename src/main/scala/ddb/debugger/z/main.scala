@@ -1,10 +1,12 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.{Command, Event}
-import org.apache.daffodil.sapi.Daffodil
+import ddb.debugger.z.compiler.CompilerAPI
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import zio._
+import zio.clock.Clock
+import zio.console.Console
 import zio.stream._
 
 import java.io.ByteArrayInputStream
@@ -18,9 +20,8 @@ object main extends scala.App {
   val schema = getClass.getResource("/jpeg.dfdl.xsd")
   val bytes = getClass.getResourceAsStream("/works.jpg").readAllBytes()
 
-  val c = Daffodil.compiler()
-  val pf = c.compileSource(schema.toURI)
-  pf.getDiagnostics.filter(_.isError).foreach(println)
+  // set up the environment with the Compiler API
+  val deps = Console.live >+> Clock.live >+> CompilerAPI.make()
 
   val app = for {
     cq <- Queue.unbounded[Command[_]]
@@ -49,7 +50,9 @@ object main extends scala.App {
     _ <- gui.run(cq, infosetView, bitposView, differ, pathView, varsView).fork
 
     // the debugger gets the command queue and event stream
-    dp = pf.onPath("/").withDebugger(new MyDebugger(cq, es)).withDebugging(true)
+    dp <- CompilerAPI.compile(schema.toURI).map { p =>
+      p.withDebugger(new MyDebugger(cq, es)).withDebugging(true)
+    }
 
     // the program will end when the parsing IO completes
     _ <- IO {
@@ -61,5 +64,5 @@ object main extends scala.App {
 
   } yield ()
 
-  Runtime.default.unsafeRun(app)
+  Runtime.unsafeFromLayer(deps).unsafeRun(app)
 }
