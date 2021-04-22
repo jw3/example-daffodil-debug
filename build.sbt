@@ -19,5 +19,3 @@ libraryDependencies := Seq(
 
 lazy val jfx = Seq("base", "controls", "fxml", "graphics", "media", "swing")
 libraryDependencies ++= jfx.map(mod => "org.openjfx" % s"javafx-$mod" % "14.0.1" classifier "linux")
-
-dependsOn(ProjectRef(uri("git://github.com/DFDLSchemas/JPEG.git"), "jpeg"))
