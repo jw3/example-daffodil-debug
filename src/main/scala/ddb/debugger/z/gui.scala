@@ -1,16 +1,16 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.{ControlProvider, Step}
+import ddb.debugger.api.Step
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
-import scalafx.scene.control.{Button, ToggleButton}
+import scalafx.scene.control.{Button, Control, ToggleButton}
 import scalafx.scene.image.{Image, ImageView}
 import scalafx.scene.paint.Color._
-import zio.IO
+import zio._
 import zio.duration.durationInt
 
 object gui {
-  def run(cq: CProducer, myctls: ControlProvider*) =
+  def run(cq: CProducer, controls: Control*) =
     for {
       _ <- IO {
         val jfxApp = new JFXApp {
@@ -61,7 +61,7 @@ object gui {
                 image = new Image(s"/works.jpg", 96,  96, true, true)
               }
 
-              content = myctls.map(_.control) :+ step :+ step10 :+ jpg
+              content = controls :+ step :+ step10 :+ jpg
             }
           }
         }

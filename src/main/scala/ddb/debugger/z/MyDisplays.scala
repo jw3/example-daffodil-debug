@@ -12,8 +12,8 @@ import scala.collection.JavaConverters._
   * represents displays such as GUI panels that would receive events, likely filtering from the overall
   * stream of events and do something with them without responding with commands
   */
-case class MyInfoSetDisplay() extends ControlProvider {
-  lazy val control: TextArea = new TextArea {
+case class MyInfoSetDisplay() {
+  lazy val control = new TextArea {
     layoutX = 0
     layoutY = 0
     prefWidth = 300
@@ -26,7 +26,7 @@ case class MyInfoSetDisplay() extends ControlProvider {
   }
 }
 
-case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
+case class MyBitPosDisplay(input: Array[Byte]) {
   lazy val control: TextField = new TextField {
     layoutX = 300
     layoutY = 0
@@ -48,7 +48,7 @@ case class MyBitPosDisplay(input: Array[Byte]) extends ControlProvider {
     }
 }
 
-case class MyPathDisplay() extends ControlProvider {
+case class MyPathDisplay() {
   lazy val control: TextArea = new TextArea {
     layoutX = 300
     layoutY = 25
@@ -67,7 +67,7 @@ case class MyPathDisplay() extends ControlProvider {
     }
 }
 
-case class MyVariablesDisplay() extends ControlProvider {
+case class MyVariablesDisplay() {
   lazy val control: TextArea = new TextArea {
     layoutX = 300
     layoutY = 125
@@ -86,7 +86,7 @@ case class MyVariablesDisplay() extends ControlProvider {
 }
 
 // a stateful consumer
-case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider {
+case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) {
   lazy val control: TextArea = new TextArea {
     layoutX = 300
     layoutY = 250
