@@ -18,6 +18,7 @@ libraryDependencies := Seq(
   "ch.qos.logback" % "logback-classic" % "1.2.3"
 )
 
+
 // portable config from the quickstart
 // http://www.scalafx.org/docs/quickstart/
 lazy val javaFXModules = {
@@ -34,6 +35,3 @@ lazy val javaFXModules = {
     .map(m => "org.openjfx" % s"javafx-$m" % "14.0.1" classifier osName)
 }
 libraryDependencies ++= javaFXModules
-
-// bring in the daffodil jpeg schema
-dependsOn(ProjectRef(uri("git://github.com/DFDLSchemas/JPEG.git"), "jpeg"))
