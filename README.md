@@ -14,8 +14,9 @@ Prototypes shouldnt be shiny :)
   - automatic step every 100 millis
 - stateless views
   - display infoset at the current step
-  - display the current bit position in the data and the corresponding value
-  - display the current path being parsed in the schema
+  - display the current bit position in the data with the corresponding value
+  - display the current schema path being parsed
+  - display the in-scope variables and their values
 - stateful views
   - display the diff of current infoset against previous step
 - Uses a snapshot from the current Daffodil master branch.
