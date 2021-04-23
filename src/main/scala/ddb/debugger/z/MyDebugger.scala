@@ -14,13 +14,14 @@ class MyDebugger(cs: CStream, es: EProducer) extends Debugger {
 
   // todo;; there may need to be tie-in to the other hooks in the Debugger interface
   //        look in the interactive debugger to see where and when the others are used
-  override def endElement(state: PState, processor: Parser): Unit = step(state, processor)
+  override def endElement(state: PState, processor: Parser): Unit =
+    rt.unsafeRunSync(step(state, processor))
 
   /**
     * we control the debug process with a syncronous flow of commands that produce events
     */
   def step(state: PState, processor: Processor) =
-    rt.unsafeRunSync(cs.take.flatMap {
+    cs.take.flatMap {
       case s @ Step(_) =>
 
         s.run(state, processor)
@@ -30,5 +31,5 @@ class MyDebugger(cs: CStream, es: EProducer) extends Debugger {
             case e             => es.publish(e)
           }
       case _ => ZIO.unit
-    })
+    }
 }
