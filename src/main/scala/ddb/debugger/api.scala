@@ -36,7 +36,7 @@ object api {
 
   case object BitPosition extends Command[BitPosEvent] {
     def run(state: PState, processor: Processor): ZIO[Any, Throwable, BitPosEvent] =
-      ZIO(state.bitPos0b).map(BitPosEvent)
+      ZIO.succeed(BitPosEvent(state.bitPos0b))
   }
   case class BitPosEvent(pos: Long) extends Event
 
