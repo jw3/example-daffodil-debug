@@ -29,7 +29,7 @@ Commands applied to the current ParseState produce Events.
 - Producers send [`Command[E]`](src/main/scala/ddb/debugger/package.scala)
 ```
 trait Command[E <: Event] {
-  def run(state: PState, processor: Processor): ZIO[Any, Throwable, E]
+  def run(state: PState, processor: Processor): Task[E]
 }
 ```
 - Sinks receive [`Event`](src/main/scala/ddb/debugger/package.scala), which are the product of a `Command` being applied to the processor state

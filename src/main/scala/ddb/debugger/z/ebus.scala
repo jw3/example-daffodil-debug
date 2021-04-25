@@ -1,7 +1,7 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.Event
-import zio.{Has, Hub, UIO, ZIO, ZLayer, stream}
+import zio.{Has, Hub, UIO, URIO, ZIO, ZLayer, stream}
 
 object ebus {
   type Eventbus = Has[Eventbus.Service]
@@ -22,8 +22,8 @@ object ebus {
       }
     }.toLayer
 
-    def pub(e: Event): ZIO[Eventbus, Nothing, Boolean] = ZIO.accessM(_.get.pub(e))
-    def pubAll(e: Iterable[Event]): ZIO[Eventbus, Nothing, Boolean] = ZIO.accessM(_.get.pubAll(e))
-    def sub(): ZIO[Eventbus, Nothing, EStream] = ZIO.accessM(e => ZIO.succeed(e.get.sub()))
+    def pub(e: Event): URIO[Eventbus, Boolean] = ZIO.accessM(_.get.pub(e))
+    def pubAll(e: Iterable[Event]): URIO[Eventbus, Boolean] = ZIO.accessM(_.get.pubAll(e))
+    def sub(): URIO[Eventbus, EStream] = ZIO.accessM(e => ZIO.succeed(e.get.sub()))
   }
 }

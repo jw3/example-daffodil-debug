@@ -1,7 +1,7 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.Command
-import zio.{Has, Queue, UIO, ZIO, ZLayer, stream}
+import zio.{Has, Queue, UIO, URIO, ZIO, ZLayer, stream}
 
 object cmdq {
   type CmdQueue = Has[CmdQueue.Service]
@@ -20,7 +20,7 @@ object cmdq {
       }
     }.toLayer
 
-    def get(): ZIO[CmdQueue, Nothing, Queue[Command[_]]] = ZIO.accessM(_.get.get())
-    def sub(): ZIO[CmdQueue, Nothing, CStream] = ZIO.accessM(e => ZIO.succeed(e.get.sub()))
+    def get(): URIO[CmdQueue, Queue[Command[_]]] = ZIO.accessM(_.get.get())
+    def sub(): URIO[CmdQueue, CStream] = ZIO.accessM(e => ZIO.succeed(e.get.sub()))
   }
 }
