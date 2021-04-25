@@ -1,13 +1,14 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.{Command, Event}
+import ddb.debugger.api.MultiEvent
+import ddb.debugger.z.cmdq.CmdQueue
 import ddb.debugger.z.compiler.CompilerAPI
+import ddb.debugger.z.ebus.Eventbus
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import zio._
 import zio.clock.Clock
 import zio.console.Console
-import zio.stream._
 
 import java.io.ByteArrayInputStream
 
@@ -20,38 +21,42 @@ object main extends scala.App {
   val schema = getClass.getResource("/jpeg.dfdl.xsd")
   val bytes = getClass.getResourceAsStream("/works.jpg").readAllBytes()
 
-  // set up the environment with the Compiler API
-  val deps = Console.live >+> Clock.live >+> CompilerAPI.make()
+  // set up the debugger runtime environment
+  implicit val rt: DebuggerRuntime = Runtime.unsafeFromLayer(
+    Console.live >+> Clock.live >+> CompilerAPI.make() >+> Eventbus.make() >+> CmdQueue.make()
+  )
 
   val app = for {
-    cq <- Queue.unbounded[Command[_]]
-    es <- Hub.unbounded[Event]
-
-    // simulate an input control
-    mc = MyControl(cq)
-    _ <- mc.run(Stream.fromHub(es)).fork
-
-    // simulate some output views
-    infosetView = MyInfoSetDisplay()
-    _ <- infosetView.run(Stream.fromHub(es)).fork
-    bitposView = MyBitPosDisplay(bytes)
-    _ <- bitposView.run(Stream.fromHub(es)).fork
-    pathView = MyPathDisplay()
-    _ <- pathView.run(Stream.fromHub(es)).fork
-    varsView = MyVariablesDisplay()
-    _ <- varsView.run(Stream.fromHub(es)).fork
-
-    // simulate a view that maintains state
+    // a view that maintains previous state of infoset
     prev <- Ref.make("")
     differ = MyDiffingInfoSetDisplay(prev)
-    _ <- differ.run(Stream.fromHub(es)).fork
+    _ <- differ.run().fork
+
+    // various output views
+    infosetView = MyInfoSetDisplay()
+    _ <- infosetView.run().fork
+    bitposView = MyBitPosDisplay(bytes)
+    _ <- bitposView.run().fork
+    pathView = MyPathDisplay()
+    _ <- pathView.run().fork
+    varsView = MyVariablesDisplay()
+    _ <- varsView.run().fork
+
+    // an input control that maintains state
+    history <- Ref.make(List.empty[MultiEvent])
+    slider = MySliderControl(history)
+    _ <- slider.run().fork
+
+    stepCount = MyStepCountDisplay(history)
+    _ <- stepCount.run().fork
 
     // fork off the gui with all the views
-    _ <- gui.run(cq, infosetView, bitposView, differ, pathView, varsView).fork
+    _ <- gui.run(infosetView, bitposView, differ, pathView, varsView, slider, stepCount).fork
 
-    // the debugger gets the command queue and event stream
+    // compile the schema and install the debugger
+    // the debugger will get all components via dependency injection
     dp <- CompilerAPI.compile(schema.toURI).map { p =>
-      p.withDebugger(new MyDebugger(cq, es)).withDebugging(true)
+      p.withDebugger(new MyDebugger()).withDebugging(true)
     }
 
     // the program will end when the parsing IO completes
@@ -64,5 +69,5 @@ object main extends scala.App {
 
   } yield ()
 
-  Runtime.unsafeFromLayer(deps).unsafeRun(app)
+  rt.unsafeRun(app)
 }

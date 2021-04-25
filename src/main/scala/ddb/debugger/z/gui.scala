@@ -1,6 +1,7 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.{ControlProvider, Step}
+import ddb.debugger.z.cmdq.CmdQueue
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
 import scalafx.scene.control.{Button, ToggleButton}
@@ -10,8 +11,9 @@ import zio.IO
 import zio.duration.durationInt
 
 object gui {
-  def run(cq: CProducer, myctls: ControlProvider*) =
+  def run(myctls: ControlProvider*)(implicit rt: DebuggerRuntime) =
     for {
+      cq <- CmdQueue.get()
       _ <- IO {
         val jfxApp = new JFXApp {
           override def stopApp(): Unit = System.exit(0)
@@ -32,8 +34,8 @@ object gui {
                 tooltip = "Step"
                 onMouseClicked = _ => {
                   step10.selected = false
-                  zio.Runtime.default.unsafeRunAsync_(
-                    cq.offer(Step.default)
+                  rt.unsafeRunAsync_(
+                    CmdQueue.get().flatMap(_.offer(Step.default))
                   )
                 }
               }
@@ -47,8 +49,8 @@ object gui {
                 graphic = new ImageView(new Image(this, s"/icons/debug-run.png"))
                 tooltip = "Auto Step"
 
-                onAction = e => {
-                  zio.Runtime.default.unsafeRunAsync_(
+                onAction = _ => {
+                  rt.unsafeRunAsync_(
                     cq.offer(Step.default).delay(100.millis).repeatWhile(_ => selected.value)
                   )
                 }
@@ -58,7 +60,7 @@ object gui {
                 layoutX = 200
                 layoutY = 320
 
-                image = new Image(s"/works.jpg", 96,  96, true, true)
+                image = new Image(s"/works.jpg", 96, 96, true, true)
               }
 
               content = myctls.map(_.control) :+ step :+ step10 :+ jpg

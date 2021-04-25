@@ -110,4 +110,6 @@ object api {
   trait InfosetEvent extends Event
   case object NoInfoset extends InfosetEvent
   case class ViewInfosetEvent(xml: String) extends InfosetEvent
+
+  case class ReplayEvent(e: Event) extends Event
 }

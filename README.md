@@ -19,6 +19,7 @@ Prototypes shouldnt be shiny :)
   - display the in-scope variables and their values
 - stateful views
   - display the diff of current infoset against previous step
+  - time traveling slider
 - Uses a snapshot from the current Daffodil master branch.
 
 ### model
