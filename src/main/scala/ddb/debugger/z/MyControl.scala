@@ -4,7 +4,6 @@ import ddb.debugger.api.{ControlProvider, MultiEvent, Step}
 import ddb.debugger.z.cmdq.CmdQueue
 import ddb.debugger.z.ebus.Eventbus
 import scalafx.application.Platform.runLater
-import scalafx.event.subscriptions.Subscription
 import scalafx.scene.control.Slider
 import zio.{IO, Ref, ZIO}
 
@@ -48,27 +47,17 @@ case class MySliderControl(history: Ref[List[MultiEvent]])(implicit rt: Debugger
     snapToTicks = true
     blockIncrement = 1.0
 
-    // todo;; might be a better way to do this... but the point is we dont want
-    //        to fire changes from the history unless its human interaction that
-    //        generated the change to the slider so just uninstall the handler
-    //        when mouse is not down
-    var sub: Option[Subscription] = None
-    val handler = (a: Number, _: Number) =>
-      rt.unsafeRunAsync_(
-        for {
-          // there is a little slop at the end of the slider, just guarding with option for now
-          v <- history.get.map(l => l.lift(a.intValue))
-          _ <- ZIO.fromOption(v).map(_.events()).flatMap(Eventbus.pubAll)
-        } yield ()
-      )
-
-    onMousePressed = _ => {
-      sub = Some(value.onChange((_, a, b) => handler(a, b)))
-      println("down")
-    }
-    onMouseReleased = _ => {
-      sub.foreach(_.cancel())
-      println("up")
-    }
+    value.onChange((_, _, v) =>
+      // dont fire unless change is from human interaction (mouse pressed)
+      if (pressed.get()) {
+        rt.unsafeRunAsync_(
+          for {
+            // there is a little slop at the end of the slider, just guarding with option for now
+            v <- history.get.map(l => l.lift(v.intValue))
+            _ <- ZIO.fromOption(v).map(_.events()).flatMap(Eventbus.pubAll)
+          } yield ()
+        )
+      }
+    )
   }
 }

@@ -9,9 +9,10 @@ Prototypes shouldnt be shiny :)
 
 - [ZIO](https://zio.dev) application 
 - rudimentary scalafx gui
-- allows stepping through a schema parse vie
+- allows stepping through a schema parse via
   - manual step by step
   - automatic step every 100 millis
+  - time traveling slider
 - stateless views
   - display infoset at the current step
   - display the current bit position in the data with the corresponding value
@@ -19,7 +20,6 @@ Prototypes shouldnt be shiny :)
   - display the in-scope variables and their values
 - stateful views
   - display the diff of current infoset against previous step
-  - time traveling slider
 - Uses a snapshot from the current Daffodil master branch.
 
 ### model

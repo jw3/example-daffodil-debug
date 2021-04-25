@@ -54,7 +54,7 @@ object main extends scala.App {
     _ <- gui.run(infosetView, bitposView, differ, pathView, varsView, slider, stepCount).fork
 
     // compile the schema and install the debugger
-    // the debugger will get all components via dependency injection
+    // the debugger will get all dependencies via environment
     dp <- CompilerAPI.compile(schema.toURI).map { p =>
       p.withDebugger(new MyDebugger()).withDebugging(true)
     }
