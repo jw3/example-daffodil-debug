@@ -1,11 +1,12 @@
 package ddb.debugger.z
 
-import ddb.debugger.api.{ControlProvider, MultiEvent, Step}
+import ddb.debugger.api.{ControlProvider, Step}
 import ddb.debugger.z.cmdq.CmdQueue
 import ddb.debugger.z.ebus.Eventbus
+import ddb.debugger.z.history.History
 import scalafx.application.Platform.runLater
 import scalafx.scene.control.Slider
-import zio.{IO, Ref, ZIO}
+import zio._
 
 /**
   * represents a control, like a "step into" button that would action and then wait for event to enable again
@@ -15,22 +16,18 @@ case class MyControl() {
   def run() = ZIO.unit
 }
 
-case class MySliderControl(history: Ref[List[MultiEvent]])(implicit rt: DebuggerRuntime) extends ControlProvider {
+case class MySliderControl()(implicit rt: DebuggerRuntime) extends ControlProvider {
   def run() =
-    Eventbus
+    History
       .sub()
       .flatMap(_.foreach {
-        case e: MultiEvent =>
-          // todo;; updating history should be elsewhere
-          history.getAndUpdate(_ :+ e).map(_.size + 1).flatMap { cnt =>
-            IO {
-              runLater {
-                control.max = cnt
-                control.value = cnt
-              }
+        case (_, idx) =>
+          IO {
+            runLater {
+              control.max = idx
+              control.value = idx
             }
           }
-        case _ => ZIO.unit
       })
 
   lazy val control: Slider = new Slider {
@@ -47,16 +44,22 @@ case class MySliderControl(history: Ref[List[MultiEvent]])(implicit rt: Debugger
     snapToTicks = true
     blockIncrement = 1.0
 
-    value.onChange((_, _, v) =>
+    value.onChange((_, prev, curr) =>
       // dont fire unless change is from human interaction (mouse pressed)
       if (pressed.get()) {
-        rt.unsafeRunAsync_(
-          for {
-            // there is a little slop at the end of the slider, just guarding with option for now
-            v <- history.get.map(l => l.lift(v.intValue))
-            _ <- ZIO.fromOption(v).map(_.events()).flatMap(Eventbus.pubAll)
-          } yield ()
-        )
+        val current = curr.intValue()
+        // the slider is double based, which results in many false events being fired
+        // so dont fire unless the movement is enough to produce different int values
+        if (current != prev.intValue()) {
+          runLater {
+            rt.unsafeRunSync(
+              History
+                .all()
+                .map(l => l.lift(current)) // todo;; indexing slop, just guard with option for now
+                .flatMap(v => ZIO.fromOption(v).map(_.events).flatMap(Eventbus.pubAll))
+            )
+          }
+        }
       }
     )
   }

@@ -1,7 +1,8 @@
 package ddb.debugger.z
 
 import ddb.debugger.api.Command
-import zio.{Has, Queue, UIO, URIO, ZIO, ZLayer, stream}
+import zio._
+import zio.stream._
 
 object cmdq {
   type CmdQueue = Has[CmdQueue.Service]
@@ -16,7 +17,7 @@ object cmdq {
         queue <- Queue.unbounded[Command[_]]
       } yield new Service {
         def get(): UIO[Queue[Command[_]]] = UIO.succeed(queue)
-        def sub(): CStream = stream.Stream.fromQueue(queue)
+        def sub(): CStream = Stream.fromQueue(queue)
       }
     }.toLayer
 

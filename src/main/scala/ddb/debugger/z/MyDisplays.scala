@@ -3,6 +3,7 @@ package ddb.debugger.z
 import com.github.difflib.DiffUtils
 import ddb.debugger.api._
 import ddb.debugger.z.ebus.Eventbus
+import ddb.debugger.z.history.History
 import scalafx.application.Platform.runLater
 import scalafx.scene.control.{Label, TextArea, TextField}
 import zio._
@@ -123,21 +124,22 @@ case class MyDiffingInfoSetDisplay(prevRef: Ref[String]) extends ControlProvider
       })
 }
 
-case class MyStepCountDisplay(history: Ref[List[MultiEvent]]) extends ControlProvider {
+case class MyStepCountDisplay() extends ControlProvider {
   lazy val control: Label = new Label {
     layoutX = 300
     layoutY = 360
     prefWidth = 100
     prefHeight = 50
-    text = "Step 0"
+    text = "Step: 0"
   }
 
   def run() =
-    Eventbus
+    History
       .sub()
       .flatMap(_.foreach {
-        case VariablesEvent(_) =>
-          history.get.map(l => runLater(control.text = s"Step ${l.size}"))
-        case _ => ZIO.unit
+        case (_, idx) =>
+          IO {
+            runLater(control.text = s"Step: ${idx + 1}")
+          }
       })
 }

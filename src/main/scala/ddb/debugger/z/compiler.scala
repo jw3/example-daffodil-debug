@@ -1,7 +1,7 @@
 package ddb.debugger.z
 
 import org.apache.daffodil.sapi.{Daffodil, DataProcessor, Diagnostic}
-import zio.{Has, IO, UIO, ZIO, ZLayer}
+import zio._
 
 import java.net.URI
 

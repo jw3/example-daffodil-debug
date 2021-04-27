@@ -7,7 +7,7 @@ import scalafx.scene.Scene
 import scalafx.scene.control.{Button, ToggleButton}
 import scalafx.scene.image.{Image, ImageView}
 import scalafx.scene.paint.Color._
-import zio.IO
+import zio._
 import zio.duration.durationInt
 
 object gui {
