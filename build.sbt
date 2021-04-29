@@ -3,13 +3,18 @@ name := "daffodil-debugger"
 version := "0.1"
 
 javacOptions ++= Seq("-source", "11")
+scalacOptions ++= Seq("-Ypartial-unification")
 scalaVersion := "2.12.13"
 
 val zioVer = "1.0.6"
 val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
+  "ch.epfl.scala" %% "scala-debug-adapter" % "1.1.1",
+  "co.fs2" %% "fs2-io" % "3.0.0",
+  
   "dev.zio" %% "zio" % zioVer,
   "dev.zio" %% "zio-streams" % zioVer,
+  
   "org.scalafx" %% "scalafx" % s"14-R19",
   "io.github.java-diff-utils" % "java-diff-utils" % "4.9",
   "com.typesafe.akka" %% "akka-actor-typed" % "2.6.13",
