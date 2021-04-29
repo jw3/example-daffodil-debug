@@ -24,8 +24,8 @@ case class MySliderControl()(implicit rt: DebuggerRuntime) extends ControlProvid
         case (_, idx) =>
           IO {
             runLater {
-              control.max = idx
-              control.value = idx
+              control.max = idx.toDouble
+              control.value = idx.toDouble
             }
           }
       })

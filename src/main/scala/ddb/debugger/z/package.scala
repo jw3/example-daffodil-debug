@@ -11,8 +11,6 @@ import zio.clock.Clock
 import zio.console.Console
 import zio.stream.ZStream
 
-import scala.language.implicitConversions
-
 package object z {
   type EStream = ZStream[Any, Nothing, Event]
   type CStream = ZStream[Any, Nothing, Command[_]]
