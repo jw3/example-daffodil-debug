@@ -10,7 +10,7 @@ val zioVer = "1.0.6"
 val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
   "ch.epfl.scala" %% "scala-debug-adapter" % "1.1.1",
-  "co.fs2" %% "fs2-io" % "3.0.0",
+  "co.fs2" %% "fs2-io" % "3.0.2",
   
   "dev.zio" %% "zio" % zioVer,
   "dev.zio" %% "zio-streams" % zioVer,
