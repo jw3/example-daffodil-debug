@@ -3,11 +3,14 @@ package ddb.debugger.dapodil
 import cats.effect._
 import cats.effect.kernel.Ref
 import cats.effect.std._
+import cats.Show
 import cats.syntax.all._
+import org.apache.daffodil.processors.parsers.PState
 import com.microsoft.java.debug.core.protocol._
 import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 import com.microsoft.java.debug.core.protocol.Requests.Command
+import fs2._
 import java.io._
 import java.net._
 import java.util.logging.Logger
@@ -104,6 +107,15 @@ class DAPodil(
           queue <- Queue.bounded[IO, Unit](1)
           data <- loadData.map(new ByteArrayInputStream(_))
           parse <- Parse(schema, data, dispatcher, queue.take, compiler)
+          nextFrameId <- DAPodil.Frame.Id.next
+          current <- Ref[IO].of(DAPodil.DAPState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
+          stateUpdate <- DAPodil.DAPState
+            .fromParse(parse.events, nextFrameId)
+            .debug()
+            .evalTap(current.set)
+            .compile
+            .drain
+            .start
 
           _ <- session.sendResponse(request.respondSuccess())
 
@@ -111,9 +123,9 @@ class DAPodil(
           event = new Events.StoppedEvent("entry", 1, true)
           _ <- session.sendEvent(event)
 
-          _ <- state.set(DAPodil.State.Launched(schema, parse, queue))
+          _ <- state.set(DAPodil.State.Launched(schema, parse, current, stateUpdate, queue))
         } yield ()
-      case s => DAPodil.InvalidDAPState.raise(request, "Initialized", s)
+      case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
 
   def threads(request: Request): IO[Unit] = {
@@ -129,9 +141,9 @@ class DAPodil(
 
   def stackTrace(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, debugger, _) =>
+      case DAPodil.State.Launched(_, _, state, _, _) =>
         for {
-          state <- debugger.state
+          state <- state.get
           response = request.respondSuccess(
             new Responses.StackTraceResponseBody(
               state.stackTrace.frames.asJava,
@@ -140,34 +152,34 @@ class DAPodil(
           )
           _ <- session.sendResponse(response)
         } yield ()
-      case s => DAPodil.InvalidDAPState.raise(request, "Launched", s)
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
   def next(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, _, queue) =>
+      case DAPodil.State.Launched(_, _, _, _, queue) =>
         for {
           _ <- queue.offer(())
           _ <- session.sendResponse(request.respondSuccess())
           _ <- session.sendEvent(new Events.StoppedEvent("step", 1L))
         } yield ()
-      case s => DAPodil.InvalidDAPState.raise(request, "Launched", s)
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
   def scopes(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, _, _) =>
+      case _: DAPodil.State.Launched =>
         session.sendResponse(
           request.respondSuccess(new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", 1, false)).asJava))
         )
-      case s => DAPodil.InvalidDAPState.raise(request, "Launched", s)
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
   def variables(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, debugger, _) =>
+      case DAPodil.State.Launched(_, _, state, _, _) =>
         for {
-          state <- debugger.state()
+          state <- state.get
           response = request.respondSuccess(
             new Responses.VariablesResponseBody(
               List(new Types.Variable("bytePos1b", state.dataOffset.toString, "number", 0, null)).asJava
@@ -175,7 +187,7 @@ class DAPodil(
           )
           _ <- session.sendResponse(response)
         } yield ()
-      case s => DAPodil.InvalidDAPState.raise(request, "Launched", s)
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 }
 
@@ -230,14 +242,98 @@ object DAPodil extends IOApp {
   object State {
     case object Unitialized extends State
     case object Initialized extends State
-    case class Launched(schema: URI, parse: Parse, queue: Queue[IO, Unit]) extends State
+    case class Launched(
+        schema: URI,
+        parse: Parse,
+        state: Ref[IO, DAPState],
+        stateUpdate: FiberIO[Unit],
+        queue: Queue[IO, Unit]
+    ) extends State
   }
 
-  case class InvalidDAPState(request: Request, expected: String, actual: State)
+  case class InvalidState(request: Request, expected: String, actual: State)
       extends RuntimeException(s"expected state $expected, was $actual when receiving request $request")
 
-  object InvalidDAPState {
+  object InvalidState {
     def raise(request: Request, expected: String, actual: State): IO[Nothing] =
-      IO.raiseError(InvalidDAPState(request, expected, actual))
+      IO.raiseError(InvalidState(request, expected, actual))
+  }
+
+  case class DAPState(
+      stackTrace: StackTrace,
+      dataOffset: Long
+  ) {
+    // there's always a single "thread"
+    val thread = new Types.Thread(1L, "daffodil")
+
+    def push(pstate: PState, nextFrameId: Frame.Id): DAPState =
+      copy(stackTrace = stackTrace.push(Frame(pstate, nextFrameId)), dataOffset = pstate.currentLocation.bytePos1b)
+
+    def pop(): DAPState =
+      copy(stackTrace = stackTrace.pop())
+  }
+
+  object DAPState {
+    implicit val show: Show[DAPState] =
+      state => show"State(${state.stackTrace}, ${state.dataOffset})"
+
+    val empty = DAPState(StackTrace.empty, 0L)
+
+    def fromParse(events: Stream[IO, Parse.Event], frameIds: Frame.Id.Next): Stream[IO, DAPState] =
+      events.evalScan(empty) {
+        case (_, Parse.Event.Init(_, _)) => IO.pure(empty)
+        case (prev, Parse.Event.StartElement(pstate, _)) =>
+          frameIds.next.map(nextFrameId => prev.push(pstate, nextFrameId))
+        case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
+      }
+  }
+
+  object Frame {
+    case class Id(value: Int) extends AnyVal
+
+    object Id {
+      trait Next {
+        def next: IO[Id]
+      }
+
+      def next: IO[Next] =
+        for {
+          ids <- Ref[IO].of(0)
+        } yield new Next {
+          def next: IO[Id] = ids.getAndUpdate(_ + 1).map(Id.apply)
+        }
+    }
+
+    // https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
+    def apply(state: PState, id: Id): Types.StackFrame =
+      new Types.StackFrame(
+        /* It must be unique across all threads.
+         * This id can be used to retrieve the scopes of the frame with the
+         * 'scopesRequest' or to restart the execution of a stackframe.
+         */
+        id.value,
+        state.currentNode.toScalaOption.map(_.name).getOrElse("???"),
+        /* If sourceReference > 0 the contents of the source must be retrieved through
+         * the SourceRequest (even if a path is specified). */
+        new Types.Source(state.schemaFileLocation.uriString, 0),
+        state.schemaFileLocation.lineNumber
+          .map(_.toInt)
+          .getOrElse(1), // line numbers start at 1 according to InitializeRequest
+        state.schemaFileLocation.columnNumber
+          .map(_.toInt)
+          .getOrElse(1) // column numbers start at 1 according to InitializeRequest
+      )
+  }
+
+  case class StackTrace(frames: List[Types.StackFrame]) {
+    def push(frame: Types.StackFrame): StackTrace = copy(frame :: frames)
+    def pop(): StackTrace = copy(frames.tail)
+  }
+
+  object StackTrace {
+    val empty: StackTrace = StackTrace(List.empty)
+
+    implicit val show: Show[StackTrace] =
+      st => st.frames.map(f => s"${f.line}:${f.column}").mkString("; ")
   }
 }
