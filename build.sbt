@@ -9,7 +9,7 @@ scalaVersion := "2.12.13"
 val zioVer = "1.0.6"
 val daffodilVer = "3.1.0-SNAPSHOT"
 libraryDependencies := Seq(
-  "ch.epfl.scala" %% "scala-debug-adapter" % "1.1.1",
+  "com.microsoft.java" % "com.microsoft.java.debug.core" % "0.31.1",
   "co.fs2" %% "fs2-io" % "3.0.2",
   
   "dev.zio" %% "zio" % zioVer,

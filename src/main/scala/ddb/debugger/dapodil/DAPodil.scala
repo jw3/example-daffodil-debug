@@ -13,7 +13,6 @@ import com.microsoft.java.debug.core.protocol.Requests.Command
 import fs2._
 import java.io._
 import java.net._
-import java.util.logging.Logger
 
 import scala.collection.JavaConverters._
 
@@ -218,7 +217,7 @@ object DAPodil extends IOApp {
       state <- Resource.liftK(Ref[IO].of[State](State.Unitialized))
       compiler = Compiler.apply
 
-      server = new Server(socket.getInputStream, socket.getOutputStream, Logger.getGlobal(), dispatcher)
+      server = new Server(socket.getInputStream, socket.getOutputStream, dispatcher)
       dapodil = new DAPodil(DAPSession(server), state, dispatcher, compiler)
       _ = server.dispatch = dapodil.dispatch
 
@@ -226,8 +225,8 @@ object DAPodil extends IOApp {
     } yield done
 
   /** Wraps an AbstractProtocolServer into an IO-based interface. */
-  class Server(in: InputStream, out: OutputStream, logger: Logger, dispatcher: Dispatcher[IO])
-      extends AbstractProtocolServer(in, out, logger) {
+  class Server(in: InputStream, out: OutputStream, dispatcher: Dispatcher[IO])
+      extends AbstractProtocolServer(in, out) {
     var dispatch: Request => IO[Unit] = null // TODO: remove super-janky null rendevous
 
     def dispatchRequest(request: Request): Unit =
