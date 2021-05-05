@@ -108,9 +108,8 @@ class DAPodil(
           parse <- Parse(schema, data, dispatcher, queue.take, compiler)
           nextFrameId <- DAPodil.Frame.Id.next
           current <- Ref[IO].of(DAPodil.DAPState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
-          stateUpdate <- DAPodil.DAPState
-            .fromParse(parse.events, nextFrameId)
-            .debug()
+          stateUpdate <- parse.events
+            .through(DAPodil.DAPState.fromParse(nextFrameId))
             .evalTap(current.set)
             .compile
             .drain
@@ -278,13 +277,14 @@ object DAPodil extends IOApp {
 
     val empty = DAPState(StackTrace.empty, 0L)
 
-    def fromParse(events: Stream[IO, Parse.Event], frameIds: Frame.Id.Next): Stream[IO, DAPState] =
-      events.evalScan(empty) {
-        case (_, Parse.Event.Init(_, _)) => IO.pure(empty)
-        case (prev, Parse.Event.StartElement(pstate, _)) =>
-          frameIds.next.map(nextFrameId => prev.push(pstate, nextFrameId))
-        case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
-      }
+    def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DAPState] =
+      events =>
+        events.evalScan(empty) {
+          case (_, Parse.Event.Init(_, _)) => IO.pure(empty)
+          case (prev, Parse.Event.StartElement(pstate, _)) =>
+            frameIds.next.map(nextFrameId => prev.push(pstate, nextFrameId))
+          case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
+        }
   }
 
   object Frame {
