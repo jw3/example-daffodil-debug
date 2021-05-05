@@ -65,13 +65,13 @@ class DAPodil(
     * TODO: rename extractor
     */
   object extract {
-    def unapply(s: String): Some[Command] =
-      Some(Command.parse(s))
+    def unapply(request: Request): Some[Command] = 
+      Some(Command.parse(request.command))
   }
 
   /** Respond to requests and optionally update the current state. */
   def dispatch(request: Request): IO[Unit] =
-    request.command match {
+    request match {
       case extract(Command.INITIALIZE) => initialize(request)
       case extract(Command.LAUNCH)     => launch(request)
       case extract(Command.THREADS)    => threads(request)
