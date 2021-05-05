@@ -110,6 +110,7 @@ class DAPodil(
           current <- Ref[IO].of(DAPodil.DAPState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
           stateUpdate <- parse.events
             .through(DAPodil.DAPState.fromParse(nextFrameId))
+            .debug(formatter = _.show)
             .evalTap(current.set)
             .compile
             .drain
