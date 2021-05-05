@@ -39,6 +39,10 @@ trait Event
 - Sinks and Producers are not connected
 
 
+### requires
+- jdk >= 11
+- Daffodil 3.1.0 snapshot
+
 ### reference
 - https://github.com/apache/daffodil
 - https://github.com/DFDLSchemas/JPEG
