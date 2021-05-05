@@ -293,9 +293,13 @@ object DAPodil extends IOApp {
   }
 
   object Frame {
+
+    /** Identifier for a stack frame within a stack trace. */
     case class Id(value: Int) extends AnyVal
 
     object Id {
+
+      /** A source of new frame identifiers. */
       trait Next {
         def next: IO[Id]
       }
@@ -308,7 +312,10 @@ object DAPodil extends IOApp {
         }
     }
 
-    // https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
+    /** Transform Daffodil state to a DAP stack frame.
+      *
+      * @see https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
+      */
     def apply(state: PState, id: Id): Types.StackFrame =
       new Types.StackFrame(
         /* It must be unique across all threads.
