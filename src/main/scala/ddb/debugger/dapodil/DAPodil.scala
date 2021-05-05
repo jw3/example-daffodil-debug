@@ -140,13 +140,13 @@ class DAPodil(
 
   def stackTrace(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, _, state, _, _) =>
+      case launched: DAPodil.State.Launched =>
         for {
-          state <- state.get
+          stackTrace <- launched.stackTrace
           response = request.respondSuccess(
             new Responses.StackTraceResponseBody(
-              state.stackTrace.frames.asJava,
-              state.stackTrace.frames.size
+              stackTrace.frames.asJava,
+              stackTrace.frames.size
             )
           )
           _ <- session.sendResponse(response)
@@ -156,9 +156,9 @@ class DAPodil(
 
   def next(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, _, _, _, queue) =>
+      case launched: DAPodil.State.Launched =>
         for {
-          _ <- queue.offer(())
+          _ <- launched.next
           _ <- session.sendResponse(request.respondSuccess())
           _ <- session.sendEvent(new Events.StoppedEvent("step", 1L))
         } yield ()
@@ -176,9 +176,9 @@ class DAPodil(
 
   def variables(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, _, state, _, _) =>
+      case launched: DAPodil.State.Launched =>
         for {
-          state <- state.get
+          state <- launched.state.get
           response = request.respondSuccess(
             new Responses.VariablesResponseBody(
               List(new Types.Variable("bytePos1b", state.dataOffset.toString, "number", 0, null)).asJava
@@ -247,7 +247,11 @@ object DAPodil extends IOApp {
         state: Ref[IO, DAPState],
         stateUpdate: FiberIO[Unit],
         queue: Queue[IO, Unit]
-    ) extends State
+    ) extends State {
+      val next: IO[Unit] = queue.offer(())
+
+      val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
+    }
   }
 
   case class InvalidState(request: Request, expected: String, actual: State)
