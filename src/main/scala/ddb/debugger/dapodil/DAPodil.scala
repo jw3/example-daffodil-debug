@@ -8,7 +8,7 @@ import cats.syntax.all._
 import com.microsoft.java.debug.core.protocol._
 import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
-import com.microsoft.java.debug.core.protocol.Requests.Command
+import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
 import java.io._
 import java.net._
@@ -59,6 +59,9 @@ class DAPodil(
 
       response
     }
+
+    def respondFailure(): Response =
+      new Response(request.seq, request.command, false)
   }
 
   /** Extract a typed command from a string discriminator.
@@ -66,22 +69,25 @@ class DAPodil(
     * TODO: rename extractor
     */
   object extract {
-    def unapply(request: Request): Some[Command] =
-      Some(Command.parse(request.command))
+    def unapply(request: Request): Some[(Command, Arguments)] =
+      Some {
+        val command = Command.parse(request.command)
+        command -> JsonUtils.fromJson(request.arguments, command.getArgumentType())
+      }
   }
 
   /** Respond to requests and optionally update the current state. */
   def handle(request: Request): IO[Unit] =
     request match {
-      case extract(Command.INITIALIZE) => initialize(request)
-      case extract(Command.LAUNCH)     => launch(request)
-      case extract(Command.THREADS)    => threads(request)
-      case extract(Command.STACKTRACE) => stackTrace(request)
-      case extract(Command.SCOPES)     => scopes(request)
-      case extract(Command.VARIABLES)  => variables(request)
-      case extract(Command.NEXT)       => next(request)
-      case extract(Command.DISCONNECT) => disconnect(request)
-      case _                           => IO(println(show"! unhandled request $request"))
+      case extract(Command.INITIALIZE, _)                       => initialize(request)
+      case extract(Command.LAUNCH, _)                           => launch(request)
+      case extract(Command.THREADS, _)                          => threads(request)
+      case extract(Command.STACKTRACE, _)                       => stackTrace(request)
+      case extract(Command.SCOPES, args: ScopesArguments)       => scopes(request, args)
+      case extract(Command.VARIABLES, args: VariablesArguments) => variables(request, args)
+      case extract(Command.NEXT, _)                             => next(request)
+      case extract(Command.DISCONNECT, _)                       => disconnect(request)
+      case _                                                    => IO(println(show"! unhandled request $request"))
     }
 
   /** State.Uninitialized -> State.Initialized */
@@ -171,45 +177,57 @@ class DAPodil(
       .sendResponse(request.respondSuccess())
       .guarantee(session.stop())
 
-  def scopes(request: Request): IO[Unit] =
+  def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
       case _: DAPodil.State.Launched =>
+        val variablesReference = args.frameId // there's only one scope per stack frame
+
         session.sendResponse(
-          request.respondSuccess(new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", 1, false)).asJava))
+          request.respondSuccess(
+            new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", variablesReference, false)).asJava)
+          )
         )
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
-  def variables(request: Request): IO[Unit] =
+  def variables(request: Request, args: VariablesArguments): IO[Unit] =
     state.get.flatMap {
       case launched: DAPodil.State.Launched =>
         // TODO: this is wrong, we need to return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
           state <- launched.state.get
-          DAPodil.Frame(
-            _,
-            dataOffset,
-            childIndex,
-            groupIndex,
-            occursIndex,
-            hidden,
-            foundDelimiter,
-            foundField
-          ) = state.stack.head
-          response = request.respondSuccess(
-            new Responses.VariablesResponseBody(
-              (List(
-                new Types.Variable("bytePos1b", dataOffset.toString, "number", 0, null),
-                new Types.Variable("hidden", hidden.toString, "bool", 0, null)
-              ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
-                ++ groupIndex.map(gi => new Types.Variable("groupIndex", gi.toString)).toList
-                ++ occursIndex.map(oi => new Types.Variable("occursIndex", oi.toString)).toList
-                ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
-                ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
-                .sortBy(_.name)
-                .asJava
-            )
-          )
+          response = state.stack
+            .find(_.stackFrame.id == args.variablesReference)
+            .map {
+              case DAPodil.Frame(
+                  _,
+                  dataOffset,
+                  childIndex,
+                  groupIndex,
+                  occursIndex,
+                  hidden,
+                  foundDelimiter,
+                  foundField
+                  ) =>
+                request.respondSuccess(
+                  new Responses.VariablesResponseBody(
+                    (List(
+                      new Types.Variable("bytePos1b", dataOffset.toString, "number", 0, null),
+                      new Types.Variable("hidden", hidden.toString, "bool", 0, null)
+                    ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
+                      ++ groupIndex.map(gi => new Types.Variable("groupIndex", gi.toString)).toList
+                      ++ occursIndex.map(oi => new Types.Variable("occursIndex", oi.toString)).toList
+                      ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
+                      ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
+                      .sortBy(_.name)
+                      .asJava
+                  )
+                )
+            }
+            .getOrElse {
+              println(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}")
+              request.respondFailure
+            }
           _ <- session.sendResponse(response)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -325,7 +343,8 @@ object DAPodil extends IOApp {
   }
 
   object DaffodilState {
-    implicit val show: Show[DaffodilState] = Show.fromToString
+    implicit val show: Show[DaffodilState] =
+      ds => show"DaffodilState(${ds.stack})"
 
     val empty = DaffodilState(List.empty)
 
@@ -407,6 +426,11 @@ object DAPodil extends IOApp {
           f <- dpr.field.toScalaOption
         } yield Misc.remapStringToVisibleGlyphs(f)
       )
+
+    implicit val show: Show[Frame] = {
+      case Frame(stackFrame, dataOffset, childIndex, groupIndex, occursIndex, hidden, foundDelimiter, foundField) =>
+        show"Frame(${stackFrame.id}:${stackFrame.name}, $dataOffset, $childIndex, $groupIndex, $occursIndex, $hidden, $foundDelimiter, $foundField)"
+    }
   }
 
   case class StackTrace(frames: List[Types.StackFrame]) {
