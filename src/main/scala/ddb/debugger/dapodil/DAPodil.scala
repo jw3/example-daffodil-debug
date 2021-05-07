@@ -79,7 +79,7 @@ class DAPodil(
       case extract(Command.SCOPES)     => scopes(request)
       case extract(Command.VARIABLES)  => variables(request)
       case extract(Command.NEXT)       => next(request)
-      case extract(Command.DISCONNECT) => session.stop()
+      case extract(Command.DISCONNECT) => disconnect(request)
       case _                           => IO(println(show"! unhandled request $request"))
     }
 
@@ -164,6 +164,11 @@ class DAPodil(
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
+
+  def disconnect(request: Request): IO[Unit] =
+    session
+      .sendResponse(request.respondSuccess())
+      .guarantee(session.stop())
 
   def scopes(request: Request): IO[Unit] =
     state.get.flatMap {
