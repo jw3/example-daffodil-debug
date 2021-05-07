@@ -5,7 +5,6 @@ import cats.effect.kernel.Ref
 import cats.effect.std._
 import cats.Show
 import cats.syntax.all._
-import org.apache.daffodil.processors.parsers.PState
 import com.microsoft.java.debug.core.protocol._
 import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
@@ -13,6 +12,8 @@ import com.microsoft.java.debug.core.protocol.Requests.Command
 import fs2._
 import java.io._
 import java.net._
+import org.apache.daffodil.processors.parsers.PState
+import org.apache.daffodil.util.Misc
 
 import scala.collection.JavaConverters._
 
@@ -184,9 +185,19 @@ class DAPodil(
       case launched: DAPodil.State.Launched =>
         for {
           state <- launched.state.get
+          DAPodil.DAPState(_, dataOffset, childIndex, groupIndex, occursIndex, hidden, foundDelimiter, foundField) = state
           response = request.respondSuccess(
             new Responses.VariablesResponseBody(
-              List(new Types.Variable("bytePos1b", state.dataOffset.toString, "number", 0, null)).asJava
+              (List(
+                new Types.Variable("bytePos1b", dataOffset.toString, "number", 0, null),
+                new Types.Variable("hidden", hidden.toString, "bool", 0, null)
+              ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
+                ++ groupIndex.map(gi => new Types.Variable("groupIndex", gi.toString)).toList
+                ++ occursIndex.map(oi => new Types.Variable("occursIndex", oi.toString)).toList
+                ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
+                ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
+                .sortBy(_.name)
+                .asJava
             )
           )
           _ <- session.sendResponse(response)
@@ -269,13 +280,34 @@ object DAPodil extends IOApp {
 
   case class DAPState(
       stackTrace: StackTrace,
-      dataOffset: Long
+      dataOffset: Long,
+      childIndex: Option[Long],
+      groupIndex: Option[Long],
+      occursIndex: Option[Long],
+      hidden: Boolean,
+      foundDelimiter: Option[String],
+      foundField: Option[String]
   ) {
     // there's always a single "thread"
     val thread = new Types.Thread(1L, "daffodil")
 
     def push(pstate: PState, nextFrameId: Frame.Id): DAPState =
-      copy(stackTrace = stackTrace.push(Frame(pstate, nextFrameId)), dataOffset = pstate.currentLocation.bytePos1b)
+      copy(
+        stackTrace = stackTrace.push(Frame(pstate, nextFrameId)),
+        dataOffset = pstate.currentLocation.bytePos1b,
+        childIndex = if (pstate.childPos != -1) Some(pstate.childPos) else None,
+        groupIndex = if (pstate.groupPos != -1) Some(pstate.groupPos) else None,
+        occursIndex = if (pstate.arrayPos != -1) Some(pstate.arrayPos) else None,
+        hidden = pstate.withinHiddenNest,
+        foundDelimiter = for {
+          dpr <- pstate.delimitedParseResult.toScalaOption
+          dv <- dpr.matchedDelimiterValue.toScalaOption
+        } yield Misc.remapStringToVisibleGlyphs(dv),
+        foundField = for {
+          dpr <- pstate.delimitedParseResult.toScalaOption
+          f <- dpr.field.toScalaOption
+        } yield Misc.remapStringToVisibleGlyphs(f)
+      )
 
     def pop(): DAPState =
       copy(stackTrace = stackTrace.pop())
@@ -285,7 +317,7 @@ object DAPodil extends IOApp {
     implicit val show: Show[DAPState] =
       state => show"State(${state.stackTrace}, ${state.dataOffset})"
 
-    val empty = DAPState(StackTrace.empty, 0L)
+    val empty = DAPState(StackTrace.empty, 0L, None, None, None, false, None, None)
 
     def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DAPState] =
       events =>
