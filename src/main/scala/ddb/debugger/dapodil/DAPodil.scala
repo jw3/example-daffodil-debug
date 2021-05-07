@@ -108,9 +108,9 @@ class DAPodil(
           data <- loadData.map(new ByteArrayInputStream(_))
           parse <- Parse(schema, data, dispatcher, queue.take, compiler)
           nextFrameId <- DAPodil.Frame.Id.next
-          current <- Ref[IO].of(DAPodil.DAPState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
+          current <- Ref[IO].of(DAPodil.DaffodilState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
           stateUpdate <- parse.events
-            .through(DAPodil.DAPState.fromParse(nextFrameId))
+            .through(DAPodil.DaffodilState.fromParse(nextFrameId))
             .debug(formatter = _.show)
             .evalTap(current.set)
             .compile
@@ -183,9 +183,19 @@ class DAPodil(
   def variables(request: Request): IO[Unit] =
     state.get.flatMap {
       case launched: DAPodil.State.Launched =>
+        // TODO: this is wrong, we need to return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
           state <- launched.state.get
-          DAPodil.DAPState(_, dataOffset, childIndex, groupIndex, occursIndex, hidden, foundDelimiter, foundField) = state
+          DAPodil.Frame(
+            _,
+            dataOffset,
+            childIndex,
+            groupIndex,
+            occursIndex,
+            hidden,
+            foundDelimiter,
+            foundField
+          ) = state.stack.head
           response = request.respondSuccess(
             new Responses.VariablesResponseBody(
               (List(
@@ -281,7 +291,7 @@ object DAPodil extends IOApp {
     case class Launched(
         schema: URI,
         parse: Parse,
-        state: Ref[IO, DAPState],
+        state: Ref[IO, DaffodilState],
         stateUpdate: FiberIO[Unit],
         queue: Queue[IO, Unit]
     ) extends State {
@@ -299,48 +309,27 @@ object DAPodil extends IOApp {
       IO.raiseError(InvalidState(request, expected, actual))
   }
 
-  case class DAPState(
-      stackTrace: StackTrace,
-      dataOffset: Long,
-      childIndex: Option[Long],
-      groupIndex: Option[Long],
-      occursIndex: Option[Long],
-      hidden: Boolean,
-      foundDelimiter: Option[String],
-      foundField: Option[String]
+  case class DaffodilState(
+      stack: List[Frame]
   ) {
     // there's always a single "thread"
     val thread = new Types.Thread(1L, "daffodil")
 
-    def push(pstate: PState, nextFrameId: Frame.Id): DAPState =
-      copy(
-        stackTrace = stackTrace.push(Frame(pstate, nextFrameId)),
-        dataOffset = pstate.currentLocation.bytePos1b,
-        childIndex = if (pstate.childPos != -1) Some(pstate.childPos) else None,
-        groupIndex = if (pstate.groupPos != -1) Some(pstate.groupPos) else None,
-        occursIndex = if (pstate.arrayPos != -1) Some(pstate.arrayPos) else None,
-        hidden = pstate.withinHiddenNest,
-        foundDelimiter = for {
-          dpr <- pstate.delimitedParseResult.toScalaOption
-          dv <- dpr.matchedDelimiterValue.toScalaOption
-        } yield Misc.remapStringToVisibleGlyphs(dv),
-        foundField = for {
-          dpr <- pstate.delimitedParseResult.toScalaOption
-          f <- dpr.field.toScalaOption
-        } yield Misc.remapStringToVisibleGlyphs(f)
-      )
+    def stackTrace: StackTrace = StackTrace(stack.map(_.stackFrame))
 
-    def pop(): DAPState =
-      copy(stackTrace = stackTrace.pop())
+    def push(pstate: PState, nextFrameId: Frame.Id): DaffodilState =
+      copy(stack = Frame(pstate, nextFrameId) :: stack)
+
+    def pop(): DaffodilState =
+      copy(stack = stack.tail)
   }
 
-  object DAPState {
-    implicit val show: Show[DAPState] =
-      state => show"State(${state.stackTrace}, ${state.dataOffset})"
+  object DaffodilState {
+    implicit val show: Show[DaffodilState] = Show.fromToString
 
-    val empty = DAPState(StackTrace.empty, 0L, None, None, None, false, None, None)
+    val empty = DaffodilState(List.empty)
 
-    def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DAPState] =
+    def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DaffodilState] =
       events =>
         events.evalScan(empty) {
           case (_, Parse.Event.Init(_, _)) => IO.pure(empty)
@@ -349,6 +338,17 @@ object DAPodil extends IOApp {
           case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
         }
   }
+
+  case class Frame(
+      stackFrame: Types.StackFrame,
+      dataOffset: Long,
+      childIndex: Option[Long],
+      groupIndex: Option[Long],
+      occursIndex: Option[Long],
+      hidden: Boolean,
+      foundDelimiter: Option[String],
+      foundField: Option[String]
+  )
 
   object Frame {
 
@@ -374,23 +374,38 @@ object DAPodil extends IOApp {
       *
       * @see https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
       */
-    def apply(state: PState, id: Id): Types.StackFrame =
-      new Types.StackFrame(
-        /* It must be unique across all threads.
-         * This id can be used to retrieve the scopes of the frame with the
-         * 'scopesRequest' or to restart the execution of a stackframe.
-         */
-        id.value,
-        state.currentNode.toScalaOption.map(_.name).getOrElse("???"),
-        /* If sourceReference > 0 the contents of the source must be retrieved through
-         * the SourceRequest (even if a path is specified). */
-        new Types.Source(state.schemaFileLocation.uriString, 0),
-        state.schemaFileLocation.lineNumber
-          .map(_.toInt)
-          .getOrElse(1), // line numbers start at 1 according to InitializeRequest
-        state.schemaFileLocation.columnNumber
-          .map(_.toInt)
-          .getOrElse(1) // column numbers start at 1 according to InitializeRequest
+    def apply(state: PState, id: Id): Frame =
+      Frame(
+        new Types.StackFrame(
+          /* It must be unique across all threads.
+           * This id can be used to retrieve the scopes of the frame with the
+           * 'scopesRequest' or to restart the execution of a stackframe.
+           */
+          id.value,
+          state.currentNode.toScalaOption.map(_.name).getOrElse("???"),
+          /* If sourceReference > 0 the contents of the source must be retrieved through
+           * the SourceRequest (even if a path is specified). */
+          new Types.Source(state.schemaFileLocation.uriString, 0),
+          state.schemaFileLocation.lineNumber
+            .map(_.toInt)
+            .getOrElse(1), // line numbers start at 1 according to InitializeRequest
+          state.schemaFileLocation.columnNumber
+            .map(_.toInt)
+            .getOrElse(1) // column numbers start at 1 according to InitializeRequest
+        ),
+        dataOffset = state.currentLocation.bytePos1b,
+        childIndex = if (state.childPos != -1) Some(state.childPos) else None,
+        groupIndex = if (state.groupPos != -1) Some(state.groupPos) else None,
+        occursIndex = if (state.arrayPos != -1) Some(state.arrayPos) else None,
+        hidden = state.withinHiddenNest,
+        foundDelimiter = for {
+          dpr <- state.delimitedParseResult.toScalaOption
+          dv <- dpr.matchedDelimiterValue.toScalaOption
+        } yield Misc.remapStringToVisibleGlyphs(dv),
+        foundField = for {
+          dpr <- state.delimitedParseResult.toScalaOption
+          f <- dpr.field.toScalaOption
+        } yield Misc.remapStringToVisibleGlyphs(f)
       )
   }
 
