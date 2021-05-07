@@ -1,49 +1,20 @@
 daffodil debugger experiments
 ===
 
-Experiments with the Daffodil debugging interface, the DAP protocol and ScalaFX components.
+Experiments with the Daffodil debugging interface and the Debug Adapter Protocol (DAP).
 
-Prototypes shouldnt be shiny :)
-
-![](doc/img.png)
-
-- [ZIO](https://zio.dev) application 
-- rudimentary scalafx gui
-- allows stepping through a schema parse via
-  - manual step by step
-  - automatic step every 100 millis
-  - time traveling slider
-- stateless views
-  - display infoset at the current step
-  - display the current bit position in the data with the corresponding value
-  - display the current schema path being parsed
-  - display the in-scope variables and their values
-- stateful views
-  - display the diff of current infoset against previous step
-- Uses a snapshot from the current Daffodil master branch.
-
-### model
-
-Commands applied to the current ParseState produce Events.
-
-- Producers send [`Command[E]`](src/main/scala/ddb/debugger/package.scala)
-```
-trait Command[E <: Event] {
-  def run(state: PState, processor: Processor): Task[E]
-}
-```
-- Sinks receive [`Event`](src/main/scala/ddb/debugger/package.scala), which are the product of a `Command` being applied to the processor state
-```
-trait Event
-```
-- Sinks and Producers are not connected
-
+### examples
+- [DAPodil debug adapter](src/main/scala/ddb/debugger/dapodil)
+- [Standalone debugger](src/main/scala/ddb/debugger/z)
 
 ### requires
 - jdk >= 11
 - Daffodil 3.1.0 snapshot
 
 ### reference
+- https://microsoft.github.io/debug-adapter-protocol
 - https://github.com/apache/daffodil
+- https://github.com/apache/daffodil-vscode
+- https://daffodil.apache.org/debugger
 - https://github.com/DFDLSchemas/JPEG
 - https://github.com/apache/daffodil/pull/518
