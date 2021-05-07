@@ -46,7 +46,7 @@ class DAPodil(
     state: Ref[IO, DAPodil.State],
     dispatcher: Dispatcher[IO],
     compiler: Compiler
-) {
+) extends DAPodil.RequestHandler {
   // TODO: the DAP server will tell us what schema and data to "debug"
   val schemaURI = IO.blocking(getClass.getResource("/jpeg.dfdl.xsd").toURI)
   val loadData = IO.blocking(getClass.getResourceAsStream("/works.jpg").readAllBytes())
@@ -66,12 +66,12 @@ class DAPodil(
     * TODO: rename extractor
     */
   object extract {
-    def unapply(request: Request): Some[Command] = 
+    def unapply(request: Request): Some[Command] =
       Some(Command.parse(request.command))
   }
 
   /** Respond to requests and optionally update the current state. */
-  def dispatch(request: Request): IO[Unit] =
+  def handle(request: Request): IO[Unit] =
     request match {
       case extract(Command.INITIALIZE) => initialize(request)
       case extract(Command.LAUNCH)     => launch(request)
@@ -220,35 +220,56 @@ object DAPodil extends IOApp {
       socket <- IO(serverSocket.accept())
       _ = println(s"! connected at $uri")
 
-      _ <- DAPodil(socket).use { dapodilDone =>
-        dapodilDone
-      }
+      _ <- DAPodil.resource(socket).use_
       _ = println(s"! disconnected at $uri")
     } yield ExitCode.Success
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def apply(socket: Socket): Resource[IO, IO[OutcomeIO[Unit]]] =
+  def resource(socket: Socket): Resource[IO, Unit] =
     for {
       dispatcher <- Dispatcher[IO]
       state <- Resource.liftK(Ref[IO].of[State](State.Unitialized))
       compiler = Compiler.apply
 
-      server = new Server(socket.getInputStream, socket.getOutputStream, dispatcher)
+      requestHandler <- Resource.liftK(Deferred[IO, RequestHandler])
+      server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
       dapodil = new DAPodil(DAPSession(server), state, dispatcher, compiler)
-      _ = server.dispatch = dapodil.dispatch
+      _ <- Resource.liftK(requestHandler.complete(dapodil))
+    } yield ()
 
-      done <- IO.blocking(server.run).onCancel(IO(server.stop())).background
-    } yield done
+  trait RequestHandler {
+    def handle(request: Request): IO[Unit]
+  }
 
   /** Wraps an AbstractProtocolServer into an IO-based interface. */
-  class Server(in: InputStream, out: OutputStream, dispatcher: Dispatcher[IO])
-      extends AbstractProtocolServer(in, out) {
-    var dispatch: Request => IO[Unit] = null // TODO: remove super-janky null rendevous
-
+  class Server(
+      in: InputStream,
+      out: OutputStream,
+      dispatcher: Dispatcher[IO],
+      requestHandler: Deferred[IO, RequestHandler]
+  ) extends AbstractProtocolServer(in, out) {
     def dispatchRequest(request: Request): Unit =
       dispatcher.unsafeRunSync {
-        IO(println(show"> $request")) *> dispatch(request)
+        for {
+          _ <- IO(println(show"> $request"))
+          handler <- requestHandler.get
+          _ <- handler.handle(request)
+        } yield ()
       }
+  }
+
+  object Server {
+
+    /** Starts an `AbstractProtocolServer` for the lifetime of the resource, stopping it upon release. */
+    def resource(
+        in: InputStream,
+        out: OutputStream,
+        dispatcher: Dispatcher[IO],
+        requestHandler: Deferred[IO, RequestHandler]
+    ): Resource[IO, AbstractProtocolServer] =
+      Resource
+        .make(IO(new Server(in, out, dispatcher, requestHandler)))(server => IO(server.stop()))
+        .flatTap(server => IO(server.run).background)
   }
 
   /** Models the states of the Daffodil <-> DAP communication. */
