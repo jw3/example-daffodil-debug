@@ -114,23 +114,14 @@ class DAPodil(
           schema <- schemaURI
           data <- loadData.map(new ByteArrayInputStream(_))
           parse <- Parse(schema, data, dispatcher, compiler)
-          nextFrameId <- DAPodil.Frame.Id.next
-          current <- Ref[IO].of(DAPodil.DaffodilState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
-          stateUpdate <- parse.events
-            .through(DAPodil.DaffodilState.fromParse(nextFrameId))
-            .debug(formatter = _.show)
-            .evalTap(current.set)
-            .compile
-            .drain
-            .flatMap(_ => session.sendEvent(new Events.TerminatedEvent()))
-            .start
+          launched <- DAPodil.State.Launched(session, schema, parse)
 
           _ <- session.sendResponse(request.respondSuccess())
 
           // send `Stopped` event to honor `"stopOnEntry":true`
           _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
 
-          _ <- state.set(DAPodil.State.Launched(schema, parse, current, stateUpdate))
+          _ <- state.set(launched)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
@@ -335,6 +326,26 @@ object DAPodil extends IOApp {
         stateUpdate: FiberIO[Unit]
     ) extends State {
       val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
+    }
+
+    object Launched {
+      def apply(
+          session: DAPSession[Response, DebugEvent],
+          schema: URI,
+          parse: Parse,
+      ): IO[Launched] =
+        for {
+          nextFrameId <- DAPodil.Frame.Id.next
+          current <- Ref[IO].of(DAPodil.DaffodilState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
+          stateUpdate <- parse.events
+            .through(DAPodil.DaffodilState.fromParse(nextFrameId))
+            .debug(formatter = _.show)
+            .evalTap(current.set)
+            .compile
+            .drain
+            .flatMap(_ => session.sendEvent(new Events.TerminatedEvent()))
+            .start
+        } yield Launched(schema, parse, current, stateUpdate)
     }
   }
 
