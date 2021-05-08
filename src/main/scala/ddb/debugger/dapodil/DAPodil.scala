@@ -122,13 +122,13 @@ class DAPodil(
             .evalTap(current.set)
             .compile
             .drain
+            .flatMap(_ => session.sendEvent(new Events.TerminatedEvent()))
             .start
 
           _ <- session.sendResponse(request.respondSuccess())
 
           // send `Stopped` event to honor `"stopOnEntry":true`
-          event = new Events.StoppedEvent("entry", 1, true)
-          _ <- session.sendEvent(event)
+          _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
 
           _ <- state.set(DAPodil.State.Launched(schema, parse, current, stateUpdate))
         } yield ()
@@ -372,6 +372,7 @@ object DAPodil extends IOApp {
           case (prev, Parse.Event.StartElement(pstate, _)) =>
             frameIds.next.map(nextFrameId => prev.push(pstate, nextFrameId))
           case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
+          case (prev, _: Parse.Event.Fini)          => IO.pure(prev)
         }
   }
 

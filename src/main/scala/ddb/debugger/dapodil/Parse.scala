@@ -29,26 +29,31 @@ object Parse {
       compiler: Compiler
   ): IO[Parse] =
     for {
-      queue <- Queue.bounded[IO, Event](10)
+      queue <- Queue.bounded[IO, Option[Event]](10)
       state <- State.create
       debugger = new Debugger {
 
         override def init(pstate: PState, processor: Parser): Unit =
           dispatcher.unsafeRunSync {
-            queue.offer(Event.Init(pstate, processor))
+            queue.offer(Some(Event.Init(pstate, processor)))
+          }
+
+        override def fini(processor: Parser): Unit =
+          dispatcher.unsafeRunSync {
+            queue.offer(Some(Event.Fini(processor))) *> queue.offer(None) // terminate the stream with None
           }
 
         override def startElement(pstate: PState, processor: Parser): Unit =
           dispatcher.unsafeRunSync {
             for {
-              _ <- queue.offer(Event.StartElement(pstate, processor))
+              _ <- queue.offer(Some(Event.StartElement(pstate, processor)))
               _ <- state.await // blocks until external control says to unblock, for stepping behavior
             } yield ()
           }
 
         override def endElement(pstate: PState, processor: Parser): Unit =
           dispatcher.unsafeRunSync {
-            queue.offer(Event.EndElement(pstate, processor))
+            queue.offer(Some(Event.EndElement(pstate, processor)))
           }
       }
       dp <- compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true))
@@ -62,7 +67,7 @@ object Parse {
         .onError(t => IO(t.printStackTrace()))
         .start
     } yield new Parse {
-      def events(): Stream[IO, Event] = Stream.fromQueueUnterminated(queue)
+      def events(): Stream[IO, Event] = Stream.fromQueueNoneTerminated(queue)
 
       def step(): IO[Unit] = state.step()
       def continue(): IO[Unit] = state.continue()
@@ -76,6 +81,7 @@ object Parse {
     case class Init(pstate: PState, parser: Parser) extends Event
     case class StartElement(pstate: PState, parser: Parser) extends Event
     case class EndElement(pstate: PState, parser: Parser) extends Event
+    case class Fini(parser: Parser) extends Event
 
     implicit val show: Show[Event] = Show.fromToString
   }
