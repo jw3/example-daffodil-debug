@@ -15,6 +15,10 @@ import cats.effect.std.Queue
 /** A running Daffodil parse. */
 trait Parse {
   def events(): Stream[IO, Parse.Event]
+
+  def step(): IO[Unit]
+  def continue(): IO[Unit]
+  def pause(): IO[Unit]
 }
 
 object Parse {
@@ -22,11 +26,11 @@ object Parse {
       schema: URI,
       data: InputStream,
       dispatcher: Dispatcher[IO],
-      await: IO[Unit],
       compiler: Compiler
   ): IO[Parse] =
     for {
       queue <- Queue.bounded[IO, Event](10)
+      state <- State.create
       debugger = new Debugger {
 
         override def init(pstate: PState, processor: Parser): Unit =
@@ -38,7 +42,7 @@ object Parse {
           dispatcher.unsafeRunSync {
             for {
               _ <- queue.offer(Event.StartElement(pstate, processor))
-              _ <- await // blocks until external control says to unblock, for stepping behavior
+              _ <- state.await // blocks until external control says to unblock, for stepping behavior
             } yield ()
           }
 
@@ -59,6 +63,10 @@ object Parse {
         .start
     } yield new Parse {
       def events(): Stream[IO, Event] = Stream.fromQueueUnterminated(queue)
+
+      def step(): IO[Unit] = state.step()
+      def continue(): IO[Unit] = state.continue()
+      def pause(): IO[Unit] = state.pause()
     }
 
   sealed trait Event
@@ -70,6 +78,57 @@ object Parse {
     case class EndElement(pstate: PState, parser: Parser) extends Event
 
     implicit val show: Show[Event] = Show.fromToString
+  }
+
+  sealed trait State {
+    def await(): IO[Unit]
+
+    def continue(): IO[Unit]
+    def step(): IO[Unit]
+    def pause(): IO[Unit]
+  }
+
+  object State {
+
+    sealed trait Mode
+    case object Running extends Mode
+    case class Stopped(whenContinued: Deferred[IO, Unit]) extends Mode
+
+    def create(): IO[State] =
+      for {
+        whenContinued <- Deferred[IO, Unit]
+        state <- Ref[IO].of[Mode](Stopped(whenContinued))
+      } yield new State {
+        def await(): IO[Unit] =
+          state.get.flatMap {
+            case Running                => IO.unit
+            case Stopped(whenContinued) => whenContinued.get
+          }
+
+        def step(): IO[Unit] =
+          for {
+            nextContinue <- Deferred[IO, Unit]
+            _ <- state.modify {
+              case Running                => Running -> IO.unit
+              case Stopped(whenContinued) => Stopped(nextContinue) -> whenContinued.complete(())
+            }.flatten
+          } yield ()
+
+        def continue(): IO[Unit] =
+          state.modify {
+            case Running                => Running -> IO.unit
+            case Stopped(whenContinued) => Running -> whenContinued.complete(()).void
+          }.flatten
+
+        def pause(): IO[Unit] =
+          for {
+            nextContinue <- Deferred[IO, Unit]
+            _ <- state.update {
+              case Running    => Stopped(nextContinue)
+              case s: Stopped => s
+            }
+          } yield ()
+      }
   }
 
 }

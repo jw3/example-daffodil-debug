@@ -86,6 +86,8 @@ class DAPodil(
       case extract(Command.SCOPES, args: ScopesArguments)       => scopes(request, args)
       case extract(Command.VARIABLES, args: VariablesArguments) => variables(request, args)
       case extract(Command.NEXT, _)                             => next(request)
+      case extract(Command.CONTINUE, _)                         => continue(request)
+      case extract(Command.PAUSE, _)                            => pause(request)
       case extract(Command.DISCONNECT, _)                       => disconnect(request)
       case _                                                    => IO(println(show"! unhandled request $request"))
     }
@@ -110,9 +112,8 @@ class DAPodil(
       case DAPodil.State.Initialized =>
         for {
           schema <- schemaURI
-          queue <- Queue.bounded[IO, Unit](1)
           data <- loadData.map(new ByteArrayInputStream(_))
-          parse <- Parse(schema, data, dispatcher, queue.take, compiler)
+          parse <- Parse(schema, data, dispatcher, compiler)
           nextFrameId <- DAPodil.Frame.Id.next
           current <- Ref[IO].of(DAPodil.DaffodilState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
           stateUpdate <- parse.events
@@ -129,7 +130,7 @@ class DAPodil(
           event = new Events.StoppedEvent("entry", 1, true)
           _ <- session.sendEvent(event)
 
-          _ <- state.set(DAPodil.State.Launched(schema, parse, current, stateUpdate, queue))
+          _ <- state.set(DAPodil.State.Launched(schema, parse, current, stateUpdate))
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
@@ -165,9 +166,30 @@ class DAPodil(
     state.get.flatMap {
       case launched: DAPodil.State.Launched =>
         for {
-          _ <- launched.next
+          _ <- launched.parse.step
           _ <- session.sendResponse(request.respondSuccess())
           _ <- session.sendEvent(new Events.StoppedEvent("step", 1L))
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
+    }
+
+  def continue(request: Request): IO[Unit] =
+    state.get.flatMap {
+      case launched: DAPodil.State.Launched =>
+        for {
+          _ <- launched.parse.continue()
+          _ <- session.sendResponse(request.respondSuccess())
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
+    }
+
+  def pause(request: Request): IO[Unit] =
+    state.get.flatMap {
+      case launched: DAPodil.State.Launched =>
+        for {
+          _ <- launched.parse.pause()
+          _ <- session.sendResponse(request.respondSuccess())
+          _ <- session.sendEvent(new Events.StoppedEvent("pause", 1L))
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -310,11 +332,8 @@ object DAPodil extends IOApp {
         schema: URI,
         parse: Parse,
         state: Ref[IO, DaffodilState],
-        stateUpdate: FiberIO[Unit],
-        queue: Queue[IO, Unit]
+        stateUpdate: FiberIO[Unit]
     ) extends State {
-      val next: IO[Unit] = queue.offer(())
-
       val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
     }
   }
@@ -327,9 +346,7 @@ object DAPodil extends IOApp {
       IO.raiseError(InvalidState(request, expected, actual))
   }
 
-  case class DaffodilState(
-      stack: List[Frame]
-  ) {
+  case class DaffodilState(stack: List[Frame]) {
     // there's always a single "thread"
     val thread = new Types.Thread(1L, "daffodil")
 
