@@ -3,7 +3,6 @@ package ddb.debugger.dapodil
 import cats.Show
 import cats.effect._
 import cats.effect.std._
-import cats.syntax.all._
 import fs2._
 import java.io.InputStream
 import java.net.URI
@@ -66,27 +65,32 @@ object Parse {
           }
       }
       dp <- Resource.eval(compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true)))
-      dpParse = IO
+      _ <- IO
         .interruptible(true) { // if necessary, kill this thread with extreme prejudice
           dp.parse(
             new InputSourceDataInputStream(data),
             new NullInfosetOutputter()
           )
         }
-        .guaranteeCase {
-          case outcome @ Outcome.Errored(t) => IO(s"parse $outcome").debug() *> IO(t.printStackTrace())
-          case outcome                      => IO(s"parse $outcome").debug().void
+        .onError(t => IO(s"$t: going to end the queue so consumers can stop").debug() *> IO(t.printStackTrace))
+        .guarantee {
+          for {
+            offered <- queue.tryOffer(None)
+            _ <- if (offered) IO.unit else IO.println("! producer couldn't end the queue when shutting down")
+          } yield ()
         }
-      parse = new Parse {
-        def events(): Stream[IO, Event] = Stream.fromQueueNoneTerminated(queue)
+        .background
+        .onFinalizeCase {
+          case ec @ Resource.ExitCase.Errored(t) => IO(s"parse: $ec").debug() *> IO(t.printStackTrace())
+          case ec                                => IO(s"parse: $ec").debug().void
+        }
+    } yield new Parse {
+      def events(): Stream[IO, Event] = Stream.fromQueueNoneTerminated(queue)
 
-        def step(): IO[Unit] = state.step()
-        def continue(): IO[Unit] = state.continue()
-        def pause(): IO[Unit] = state.pause()
-      }
-      // link the scope of the Daffodil parse to the externally accessible Parse value, so if one is canceled, they both are canceled
-      parse <- dpParse.background.parProductR(Resource.pure(parse))
-    } yield parse
+      def step(): IO[Unit] = state.step()
+      def continue(): IO[Unit] = state.continue()
+      def pause(): IO[Unit] = state.pause()
+    }
 
   /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
