@@ -17,7 +17,6 @@ import org.apache.daffodil.util.Misc
 import scala.collection.JavaConverters._
 
 import logging._
-import ddb.debugger.dapodil.DAPodil.State.Launched
 
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
@@ -192,13 +191,9 @@ class DAPodil(
     }
 
   def disconnect(request: Request): IO[Unit] =
-    state.get.flatMap {
-      case Launched(_, parse, _) => parse.stop()
-      case _                     => IO.unit
-    } *>
-      session
-        .sendResponse(request.respondSuccess())
-        .guarantee(hotswap.clear *> whenDone.complete(()).void) // TODO: new state: disconnected
+    session
+      .sendResponse(request.respondSuccess())
+      .guarantee(hotswap.clear *> whenDone.complete(()).void) // TODO: new state: disconnected
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
