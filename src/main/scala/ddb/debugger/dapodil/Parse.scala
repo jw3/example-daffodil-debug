@@ -58,7 +58,7 @@ object Parse {
       }
       dp <- compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true))
       _ <- IO
-        .blocking {
+        .interruptible(true) { // if necessary, kill this thread with extreme prejudice
           dp.parse(
             new InputSourceDataInputStream(data),
             new NullInfosetOutputter()
