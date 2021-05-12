@@ -268,8 +268,8 @@ object DAPodil extends IOApp {
 
       _ <- DAPodil
         .resource(socket)
-        .use(whenDone => whenDone *> IO("whenDone completed").debug)
-      _ = IO(s"! disconnected at $uri").debug()
+        .use(whenDone => whenDone *> IO("whenDone: completed").debug)
+      _ <- IO(s"! disconnected at $uri").debug()
     } yield ExitCode.Success
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
