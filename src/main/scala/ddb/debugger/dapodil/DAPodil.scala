@@ -12,31 +12,27 @@ import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
 import java.io._
 import java.net._
-import org.apache.daffodil.processors.parsers.PState
 import org.apache.daffodil.util.Misc
 
 import scala.collection.JavaConverters._
 
 import logging._
+import ddb.debugger.dapodil.DAPodil.State.Launched
 
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
   def sendResponse(response: R): IO[Unit]
   def sendEvent(event: E): IO[Unit]
-  def stop(): IO[Unit]
 }
 
 object DAPSession {
   def apply(server: AbstractProtocolServer): DAPSession[Response, DebugEvent] =
     new DAPSession[Response, DebugEvent] {
       def sendResponse(response: Response): IO[Unit] =
-        IO(println(show"< $response")) *> IO.blocking(server.sendResponse(response))
+        IO(show"<R $response").debug() *> IO.blocking(server.sendResponse(response))
 
       def sendEvent(event: DebugEvent): IO[Unit] =
-        IO(println(show"E $event")) *> IO.blocking(server.sendEvent(event))
-
-      def stop(): IO[Unit] =
-        IO(server.stop())
+        IO(show"<E $event").debug() *> IO.blocking(server.sendEvent(event))
     }
 }
 
@@ -44,8 +40,9 @@ object DAPSession {
 class DAPodil(
     session: DAPSession[Response, DebugEvent],
     state: Ref[IO, DAPodil.State],
-    dispatcher: Dispatcher[IO],
-    compiler: Compiler
+    hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resouce management
+    compiler: Compiler,
+    whenDone: Deferred[IO, Unit]
 ) extends DAPodil.RequestHandler {
   // TODO: the DAP server will tell us what schema and data to "debug"
   val schemaURI = IO.blocking(getClass.getResource("/jpeg.dfdl.xsd").toURI)
@@ -79,6 +76,8 @@ class DAPodil(
   /** Respond to requests and optionally update the current state. */
   def handle(request: Request): IO[Unit] =
     request match {
+      case extract(Command.INITIALIZE, _)                                => initialize(request)
+      case extract(Command.LAUNCH, _)                                    => launch(request)
       case extract(Command.INITIALIZE, _)                       => initialize(request)
       case extract(Command.LAUNCH, _)                           => launch(request)
       case extract(Command.THREADS, _)                          => threads(request)
@@ -90,18 +89,25 @@ class DAPodil(
       case extract(Command.PAUSE, _)                            => pause(request)
       case extract(Command.DISCONNECT, _)                       => disconnect(request)
       case _                                                    => IO(println(show"! unhandled request $request"))
+      case extract(Command.THREADS, _)                                   => threads(request)
+      case extract(Command.STACKTRACE, _)                                => stackTrace(request)
+      case extract(Command.SCOPES, args: ScopesArguments)                => scopes(request, args)
+      case extract(Command.VARIABLES, args: VariablesArguments)          => variables(request, args)
+      case extract(Command.NEXT, _)                                      => next(request)
+      case extract(Command.CONTINUE, _)                                  => continue(request)
+      case extract(Command.PAUSE, _)                                     => pause(request)
+      case extract(Command.DISCONNECT, _)                                => disconnect(request)
+      case _                                                             => IO(show"! unhandled request $request").debug().void
     }
 
   /** State.Uninitialized -> State.Initialized */
   def initialize(request: Request): IO[Unit] =
     state.modify {
       case DAPodil.State.Unitialized =>
-        val response = request.respondSuccess {
-          val caps = new Types.Capabilities()
-          caps.supportsConfigurationDoneRequest = true
-          new Responses.InitializeResponseBody(caps)
-        }
-        DAPodil.State.Initialized -> session.sendResponse(response)
+        val response = request.respondSuccess(new Responses.InitializeResponseBody(new Types.Capabilities()))
+        DAPodil.State.Initialized -> (session.sendResponse(response) *> session.sendEvent(
+          new Events.InitializedEvent()
+        ))
       case s => s -> IO.raiseError(new RuntimeException("can only initialize when uninitialized"))
     }.flatten
 
@@ -113,8 +119,8 @@ class DAPodil(
         for {
           schema <- schemaURI
           data <- loadData.map(new ByteArrayInputStream(_))
-          parse <- Parse(schema, data, dispatcher, compiler)
-          launched <- DAPodil.State.Launched(session, schema, parse)
+          parse = Parse(schema, data, compiler)
+          launched <- hotswap.swap(DAPodil.State.Launched.resource(session, schema, parse))
 
           _ <- session.sendResponse(request.respondSuccess())
 
@@ -186,9 +192,13 @@ class DAPodil(
     }
 
   def disconnect(request: Request): IO[Unit] =
-    session
-      .sendResponse(request.respondSuccess())
-      .guarantee(session.stop())
+    state.get.flatMap {
+      case Launched(_, parse, _) => parse.stop()
+      case _                     => IO.unit
+    } *>
+      session
+        .sendResponse(request.respondSuccess())
+        .guarantee(hotswap.clear *> whenDone.complete(()).void) // TODO: new state: disconnected
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
@@ -256,27 +266,30 @@ object DAPodil extends IOApp {
       serverSocket = new ServerSocket(address.getPort, 1, address.getAddress)
       uri = URI.create(s"tcp://${address.getHostString}:${serverSocket.getLocalPort}")
 
-      _ = println(s"! waiting at $uri")
+      _ <- IO(s"! waiting at $uri").debug()
 
       socket <- IO(serverSocket.accept())
-      _ = println(s"! connected at $uri")
+      _ <- IO(s"! connected at $uri").debug()
 
-      _ <- DAPodil.resource(socket).use_
-      _ = println(s"! disconnected at $uri")
+      _ <- DAPodil
+        .resource(socket)
+        .use(whenDone => whenDone *> IO("whenDone completed").debug)
+      _ = IO(s"! disconnected at $uri").debug()
     } yield ExitCode.Success
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def resource(socket: Socket): Resource[IO, Unit] =
+  def resource(socket: Socket): Resource[IO, IO[Unit]] =
     for {
       dispatcher <- Dispatcher[IO]
-      state <- Resource.liftK(Ref[IO].of[State](State.Unitialized))
-      compiler = Compiler.apply
-
-      requestHandler <- Resource.liftK(Deferred[IO, RequestHandler])
+      requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
       server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
-      dapodil = new DAPodil(DAPSession(server), state, dispatcher, compiler)
-      _ <- Resource.liftK(requestHandler.complete(dapodil))
-    } yield ()
+      state <- Resource.eval(Ref[IO].of[State](State.Unitialized))
+      hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => IO(s"hotswap: $ec").debug().void)
+      compiler = Compiler.apply
+      whenDone <- Resource.eval(Deferred[IO, Unit])
+      dapodil = new DAPodil(DAPSession(server), state, hotswap, compiler, whenDone)
+      _ <- Resource.eval(requestHandler.complete(dapodil))
+    } yield whenDone.get
 
   trait RequestHandler {
     def handle(request: Request): IO[Unit]
@@ -292,7 +305,7 @@ object DAPodil extends IOApp {
     def dispatchRequest(request: Request): Unit =
       dispatcher.unsafeRunSync {
         for {
-          _ <- IO(println(show"> $request"))
+          _ <- IO(show"R> $request").debug()
           handler <- requestHandler.get
           _ <- handler.handle(request)
         } yield ()
@@ -322,30 +335,41 @@ object DAPodil extends IOApp {
     case class Launched(
         schema: URI,
         parse: Parse,
-        state: Ref[IO, DaffodilState],
-        stateUpdate: FiberIO[Unit]
+        state: Ref[IO, DaffodilState]
     ) extends State {
       val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
     }
 
     object Launched {
-      def apply(
+      def resource(
           session: DAPSession[Response, DebugEvent],
           schema: URI,
-          parse: Parse,
-      ): IO[Launched] =
+          parseResource: Resource[IO, Parse]
+      ): Resource[IO, Launched] =
         for {
-          nextFrameId <- DAPodil.Frame.Id.next
-          current <- Ref[IO].of(DAPodil.DaffodilState.empty) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
-          stateUpdate <- parse.events
+          nextFrameId <- Resource.eval(DAPodil.Frame.Id.next)
+          current <- Resource.eval(Ref[IO].of(DAPodil.DaffodilState.empty)) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
+          _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
+          parse <- parseResource
+          updateDaffodilState = parse.events
             .through(DAPodil.DaffodilState.fromParse(nextFrameId))
-            .debug(formatter = _.show)
             .evalTap(current.set)
+            .onFinalizeCase {
+              case ec @ kernel.Resource.ExitCase.Errored(t) =>
+                IO(s"updateDaffodilState: $ec").debug() *> IO(t.printStackTrace())
+              case ec =>
+                IO(s"updateDaffodilState: $ec").debug() *>
+                  session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
+                  session.sendEvent(new Events.TerminatedEvent())
+            }
+          launched <- Stream
+            .emit(Launched(schema, parse, current))
+            .concurrently(updateDaffodilState)
             .compile
-            .drain
-            .flatMap(_ => session.sendEvent(new Events.TerminatedEvent()))
-            .start
-        } yield Launched(schema, parse, current, stateUpdate)
+            .resource
+            .lastOrError
+            .onFinalizeCase(ec => IO(s"launched: $ec").debug().void)
+        } yield launched
     }
   }
 
