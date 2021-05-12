@@ -1,6 +1,6 @@
 name := "daffodil-debugger"
 
-version := "0.1"
+git.useGitDescribe := true
 
 javacOptions ++= Seq("-source", "11")
 scalacOptions ++= Seq("-Ypartial-unification")
@@ -40,3 +40,5 @@ lazy val javaFXModules = {
     .map(m => "org.openjfx" % s"javafx-$m" % "14.0.1" classifier osName)
 }
 libraryDependencies ++= javaFXModules
+
+enablePlugins(GitVersioning, JavaAppPackaging, UniversalPlugin)
