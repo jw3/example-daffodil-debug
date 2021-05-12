@@ -74,14 +74,15 @@ object Parse {
       def pause(): IO[Unit] = state.pause()
     }
 
+  /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
 
-  // TODO: it's probably very dubious to assume PState and Parser are immutable
   object Event {
-    case class Init(pstate: PState, parser: Parser) extends Event
-    case class StartElement(pstate: PState, parser: Parser) extends Event
-    case class EndElement(pstate: PState, parser: Parser) extends Event
-    case class Fini(parser: Parser) extends Event
+    case class Init(state: StateForDebugger) extends Event
+    case class StartElement(state: StateForDebugger, name: Option[String], schemaLocation: SchemaFileLocation)
+        extends Event
+    case class EndElement(state: StateForDebugger) extends Event
+    case object Fini extends Event
 
     implicit val show: Show[Event] = Show.fromToString
   }

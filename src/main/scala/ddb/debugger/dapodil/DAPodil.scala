@@ -363,11 +363,11 @@ object DAPodil extends IOApp {
 
     def stackTrace: StackTrace = StackTrace(stack.map(_.stackFrame))
 
-    def push(pstate: PState, nextFrameId: Frame.Id): DaffodilState =
-      copy(stack = Frame(pstate, nextFrameId) :: stack)
+    def push(startElement: Parse.Event.StartElement, nextFrameId: Frame.Id): DaffodilState =
+      copy(stack = Frame(startElement, nextFrameId) :: stack)
 
     def pop(): DaffodilState =
-      copy(stack = stack.tail)
+      copy(stack = if (stack.isEmpty) stack else stack.tail) // TODO: warn of bad pop
   }
 
   object DaffodilState {
@@ -376,14 +376,15 @@ object DAPodil extends IOApp {
 
     val empty = DaffodilState(List.empty)
 
+    /** Translate parse events to updated Daffodil state. */
     def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DaffodilState] =
       events =>
         events.evalScan(empty) {
-          case (_, Parse.Event.Init(_, _)) => IO.pure(empty)
-          case (prev, Parse.Event.StartElement(pstate, _)) =>
-            frameIds.next.map(nextFrameId => prev.push(pstate, nextFrameId))
-          case (prev, Parse.Event.EndElement(_, _)) => IO.pure(prev.pop)
-          case (prev, _: Parse.Event.Fini)          => IO.pure(prev)
+          case (_, Parse.Event.Init(_)) => IO.pure(empty)
+          case (prev, startElement: Parse.Event.StartElement) =>
+            frameIds.next.map(nextFrameId => prev.push(startElement, nextFrameId))
+          case (prev, Parse.Event.EndElement(_)) => IO.pure(prev.pop)
+          case (prev, _: Parse.Event.Fini.type)  => IO.pure(prev)
         }
   }
 
@@ -422,7 +423,7 @@ object DAPodil extends IOApp {
       *
       * @see https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
       */
-    def apply(state: PState, id: Id): Frame =
+    def apply(startElement: Parse.Event.StartElement, id: Id): Frame =
       Frame(
         new Types.StackFrame(
           /* It must be unique across all threads.
@@ -430,28 +431,28 @@ object DAPodil extends IOApp {
            * 'scopesRequest' or to restart the execution of a stackframe.
            */
           id.value,
-          state.currentNode.toScalaOption.map(_.name).getOrElse("???"),
+          startElement.name.getOrElse("???"),
           /* If sourceReference > 0 the contents of the source must be retrieved through
            * the SourceRequest (even if a path is specified). */
-          new Types.Source(state.schemaFileLocation.uriString, 0),
-          state.schemaFileLocation.lineNumber
+          new Types.Source(startElement.schemaLocation.uriString, 0),
+          startElement.schemaLocation.lineNumber
             .map(_.toInt)
             .getOrElse(1), // line numbers start at 1 according to InitializeRequest
-          state.schemaFileLocation.columnNumber
+          startElement.schemaLocation.columnNumber
             .map(_.toInt)
             .getOrElse(1) // column numbers start at 1 according to InitializeRequest
         ),
-        dataOffset = state.currentLocation.bytePos1b,
-        childIndex = if (state.childPos != -1) Some(state.childPos) else None,
-        groupIndex = if (state.groupPos != -1) Some(state.groupPos) else None,
-        occursIndex = if (state.arrayPos != -1) Some(state.arrayPos) else None,
-        hidden = state.withinHiddenNest,
+        dataOffset = startElement.state.currentLocation.bytePos1b,
+        childIndex = if (startElement.state.childPos != -1) Some(startElement.state.childPos) else None,
+        groupIndex = if (startElement.state.groupPos != -1) Some(startElement.state.groupPos) else None,
+        occursIndex = if (startElement.state.arrayPos != -1) Some(startElement.state.arrayPos) else None,
+        hidden = startElement.state.withinHiddenNest,
         foundDelimiter = for {
-          dpr <- state.delimitedParseResult.toScalaOption
+          dpr <- startElement.state.delimitedParseResult.toScalaOption
           dv <- dpr.matchedDelimiterValue.toScalaOption
         } yield Misc.remapStringToVisibleGlyphs(dv),
         foundField = for {
-          dpr <- state.delimitedParseResult.toScalaOption
+          dpr <- startElement.state.delimitedParseResult.toScalaOption
           f <- dpr.field.toScalaOption
         } yield Misc.remapStringToVisibleGlyphs(f)
       )
