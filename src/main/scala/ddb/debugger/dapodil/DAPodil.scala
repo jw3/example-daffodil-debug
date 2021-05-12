@@ -206,7 +206,7 @@ class DAPodil(
   def variables(request: Request, args: VariablesArguments): IO[Unit] =
     state.get.flatMap {
       case launched: DAPodil.State.Launched =>
-        // TODO: this is wrong, we need to return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
+        // return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
           state <- launched.state.get
           response = state.stack
