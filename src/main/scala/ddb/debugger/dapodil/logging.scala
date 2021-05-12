@@ -1,6 +1,8 @@
 package ddb.debugger.dapodil
 
 import cats.Show
+import cats.effect._
+import cats.syntax.all._
 import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 
@@ -12,5 +14,10 @@ object logging {
     response => s"#${response.request_seq} ${response.command}"
 
   implicit val eventShow: Show[DebugEvent] =
-    event => s"${event}"
+    event => s"${event.`type`}"
+
+  implicit class DebugOps[A](fa: IO[A]) {
+    def debug(): IO[A] =
+      fa.flatTap(a => IO.println(s"[${Thread.currentThread.getName}] $a"))
+  }
 }
