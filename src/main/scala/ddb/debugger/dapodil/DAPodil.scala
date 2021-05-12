@@ -238,7 +238,7 @@ class DAPodil(
                 )
             }
             .getOrElse {
-              println(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}")
+              println(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") // TODO: handle better
               request.respondFailure
             }
           _ <- session.sendResponse(response)
