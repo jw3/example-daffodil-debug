@@ -13,8 +13,8 @@ import org.apache.daffodil.processors.parsers._
 import org.apache.daffodil.processors.StateForDebugger
 import org.apache.daffodil.sapi.infoset.NullInfosetOutputter
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
-
-import logging._
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 /** A running Daffodil parse. */
 trait Parse {
@@ -27,6 +27,8 @@ trait Parse {
 }
 
 object Parse {
+  implicit val logger: Logger[IO] = Slf4jLogger.getLogger
+
   def resource(
       schema: URI,
       data: InputStream,
@@ -85,17 +87,17 @@ object Parse {
             new NullInfosetOutputter()
           )
         }
-        .onError(t => IO(s"$t: going to end the queue so consumers can stop").debug() *> IO(t.printStackTrace))
+        .onError(t => Logger[IO].debug(s"$t: going to end the queue so consumers can stop") *> IO(t.printStackTrace))
         .guarantee {
           for {
             offered <- queue.tryOffer(None)
-            _ <- if (offered) IO.unit else IO.println("! producer couldn't end the queue when shutting down")
+            _ <- if (offered) IO.unit else Logger[IO].warn("producer couldn't end the queue when shutting down")
           } yield ()
         }
         .background
         .onFinalizeCase {
-          case ec @ Resource.ExitCase.Errored(t) => IO(s"parse: $ec").debug() *> IO(t.printStackTrace())
-          case ec                                => IO(s"parse: $ec").debug().void
+          case ec @ Resource.ExitCase.Errored(t) => Logger[IO].error(t)(s"parse: $ec")
+          case ec                                => Logger[IO].debug(s"parse: $ec")
         }
     } yield new Parse {
       def events(): Stream[IO, Event] = Stream.fromQueueNoneTerminated(queue)

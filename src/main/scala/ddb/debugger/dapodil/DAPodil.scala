@@ -14,6 +14,8 @@ import java.io._
 import java.net._
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.util.Misc
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import scala.collection.JavaConverters._
 
@@ -26,13 +28,15 @@ trait DAPSession[R, E] {
 }
 
 object DAPSession {
+  implicit val logger: Logger[IO] = Slf4jLogger.getLogger
+
   def apply(server: AbstractProtocolServer): DAPSession[Response, DebugEvent] =
     new DAPSession[Response, DebugEvent] {
       def sendResponse(response: Response): IO[Unit] =
-        IO(show"<R $response").debug() *> IO.blocking(server.sendResponse(response))
+        Logger[IO].debug(show"<R $response") *> IO.blocking(server.sendResponse(response))
 
       def sendEvent(event: DebugEvent): IO[Unit] =
-        IO(show"<E $event").debug() *> IO.blocking(server.sendEvent(event))
+        Logger[IO].debug(show"<E $event") *> IO.blocking(server.sendEvent(event))
     }
 }
 
@@ -47,6 +51,8 @@ class DAPodil(
   // TODO: the DAP server will tell us what schema and data to "debug"
   val schemaURI = IO.blocking(getClass.getResource("/jpeg.dfdl.xsd").toURI)
   val loadData = IO.blocking(getClass.getResourceAsStream("/works.jpg").readAllBytes())
+
+  implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   /** Extension methods to create responses from requests. */
   implicit class RequestSyntax(request: Request) {
@@ -87,7 +93,7 @@ class DAPodil(
       case extract(Command.CONTINUE, _)                                  => continue(request)
       case extract(Command.PAUSE, _)                                     => pause(request)
       case extract(Command.DISCONNECT, _)                                => disconnect(request)
-      case _                                                             => IO(show"! unhandled request $request").debug().void
+      case _                                                             => Logger[IO].warn(show"unhandled request $request")
     }
 
   /** State.Uninitialized -> State.Initialized */
@@ -256,17 +262,20 @@ class DAPodil(
                   )
                 )
             }
-            .getOrElse {
-              println(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") // TODO: handle better
-              request.respondFailure
-            }
-          _ <- session.sendResponse(response)
+          _ <- response.fold(
+            Logger[IO]
+              .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") *> // TODO: handle better
+              session.sendResponse(request.respondFailure)
+          )(session.sendResponse)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 }
 
 object DAPodil extends IOApp {
+
+  implicit val logger: Logger[IO] = Slf4jLogger.getLogger
+
   def run(args: List[String]): IO[ExitCode] =
     for {
       state <- Ref[IO].of[State](State.Unitialized)
@@ -275,15 +284,15 @@ object DAPodil extends IOApp {
       serverSocket = new ServerSocket(address.getPort, 1, address.getAddress)
       uri = URI.create(s"tcp://${address.getHostString}:${serverSocket.getLocalPort}")
 
-      _ <- IO(s"! waiting at $uri").debug()
+      _ <- Logger[IO].info(s"waiting at $uri")
 
       socket <- IO(serverSocket.accept())
-      _ <- IO(s"! connected at $uri").debug()
+      _ <- Logger[IO].info(s"connected at $uri")
 
       _ <- DAPodil
         .resource(socket)
-        .use(whenDone => whenDone *> IO("whenDone: completed").debug)
-      _ <- IO(s"! disconnected at $uri").debug()
+        .use(whenDone => whenDone *> Logger[IO].debug("whenDone: completed"))
+      _ <- Logger[IO].info(s"disconnected at $uri")
     } yield ExitCode.Success
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
@@ -293,7 +302,7 @@ object DAPodil extends IOApp {
       requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
       server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
       state <- Resource.eval(Ref[IO].of[State](State.Unitialized))
-      hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => IO(s"hotswap: $ec").debug().void)
+      hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => Logger[IO].debug(s"hotswap: $ec"))
       compiler = Compiler.apply
       whenDone <- Resource.eval(Deferred[IO, Unit])
       dapodil = new DAPodil(DAPSession(server), state, hotswap, compiler, whenDone)
@@ -314,7 +323,7 @@ object DAPodil extends IOApp {
     def dispatchRequest(request: Request): Unit =
       dispatcher.unsafeRunSync {
         for {
-          _ <- IO(show"R> $request").debug()
+          _ <- Logger[IO].debug(show"R> $request")
           handler <- requestHandler.get
           _ <- handler.handle(request)
         } yield ()
@@ -366,9 +375,9 @@ object DAPodil extends IOApp {
             .evalTap(current.set)
             .onFinalizeCase {
               case ec @ kernel.Resource.ExitCase.Errored(t) =>
-                IO(s"updateDaffodilState: $ec").debug() *> IO(t.printStackTrace())
+                Logger[IO].debug(s"updateDaffodilState: $ec") *> IO(t.printStackTrace())
               case ec =>
-                IO(s"updateDaffodilState: $ec").debug() *>
+                Logger[IO].debug(s"updateDaffodilState: $ec") *>
                   session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
                   session.sendEvent(new Events.TerminatedEvent())
             }
@@ -378,11 +387,11 @@ object DAPodil extends IOApp {
           launched <- Stream
             .emit(Launched(schema, parse, current, breakpoints))
             .concurrently(updateDaffodilState.merge(stoppedEventsDelivery))
-            .evalTap(_ => IO("started Launched"))
+            .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
             .resource
             .lastOrError
-            .onFinalizeCase(ec => IO(s"launched: $ec").debug().void)
+            .onFinalizeCase(ec => Logger[IO].debug(s"launched: $ec"))
         } yield launched
     }
 
