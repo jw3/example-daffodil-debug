@@ -10,7 +10,6 @@ import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
-import fs2.concurrent._
 import java.io._
 import java.net._
 import org.apache.daffodil.exceptions.SchemaFileLocation
@@ -111,19 +110,14 @@ class DAPodil(
           schema <- schemaURI
           data <- loadData.map(new ByteArrayInputStream(_))
 
-          breakpoints <- SignallingRef[IO, DAPodil.Breakpoints](DAPodil.Breakpoints(Map.empty))
-          breakpointHits <- Channel.unbounded[IO, DAPodil.Location]
-          _ <- breakpointHits.stream
-            .evalTap { loc =>
-              IO(s"breakpoint hit: $loc").debug() *>
-              session.sendEvent(new Events.StoppedEvent("breakpoint", 1L))
-            }
-            .compile
-            .drain
-            .start // TODO: manage
+          breakpoints <- Ref[IO].of(DAPodil.Breakpoints(Map.empty))
 
-          parse = Parse(schema, data, compiler, breakpoints, location => breakpointHits.send(location).void)
-          launched <- hotswap.swap(DAPodil.State.Launched.resource(session, schema, parse, breakpoints))
+          launched <- hotswap.swap {
+            for {
+              parse <- Parse.resource(schema, data, compiler, breakpoints)
+              launched <- DAPodil.State.Launched.resource(session, schema, parse, breakpoints)
+            } yield launched
+          }
 
           _ <- session.sendResponse(request.respondSuccess())
 
@@ -187,7 +181,6 @@ class DAPodil(
         for {
           _ <- launched.parse.step
           _ <- session.sendResponse(request.respondSuccess())
-          _ <- session.sendEvent(new Events.StoppedEvent("step", 1L))
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -208,7 +201,6 @@ class DAPodil(
         for {
           _ <- launched.parse.pause()
           _ <- session.sendResponse(request.respondSuccess())
-          _ <- session.sendEvent(new Events.StoppedEvent("pause", 1L))
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -221,11 +213,10 @@ class DAPodil(
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
       case _: DAPodil.State.Launched =>
-        val variablesReference = args.frameId // there's only one scope per stack frame
-
         session.sendResponse(
           request.respondSuccess(
-            new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", variablesReference, false)).asJava)
+            // there's only one scope per stack frame
+            new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", args.frameId, false)).asJava)
           )
         )
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -354,7 +345,7 @@ object DAPodil extends IOApp {
         schema: URI,
         parse: Parse,
         state: Ref[IO, DaffodilState],
-        breakpoints: SignallingRef[IO, Breakpoints]
+        breakpoints: Ref[IO, Breakpoints]
     ) extends State {
       val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
     }
@@ -363,14 +354,13 @@ object DAPodil extends IOApp {
       def resource(
           session: DAPSession[Response, DebugEvent],
           schema: URI,
-          parseResource: Resource[IO, Parse],
-          breakpoints: SignallingRef[IO, Breakpoints]
+          parse: Parse,
+          breakpoints: Ref[IO, Breakpoints]
       ): Resource[IO, Launched] =
         for {
           nextFrameId <- Resource.eval(DAPodil.Frame.Id.next)
           current <- Resource.eval(Ref[IO].of(DAPodil.DaffodilState.empty)) // TODO: explore `Stream.holdResource` to convert `Stream[IO, Event]` to `Resource[IO, Signal[IO, Event]]`
           _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
-          parse <- parseResource
           updateDaffodilState = parse.events
             .through(DAPodil.DaffodilState.fromParse(nextFrameId))
             .evalTap(current.set)
@@ -382,14 +372,28 @@ object DAPodil extends IOApp {
                   session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
                   session.sendEvent(new Events.TerminatedEvent())
             }
+
+          stoppedEventsDelivery = parse.state.discrete.evalTap(deliverStoppedEvents(session))
+
           launched <- Stream
             .emit(Launched(schema, parse, current, breakpoints))
-            .concurrently(updateDaffodilState)
+            .concurrently(updateDaffodilState.merge(stoppedEventsDelivery))
+            .evalTap(_ => IO("started Launched"))
             .compile
             .resource
             .lastOrError
             .onFinalizeCase(ec => IO(s"launched: $ec").debug().void)
         } yield launched
+    }
+
+    def deliverStoppedEvents(session: DAPSession[Response, DebugEvent]): Parse.State => IO[Unit] = {
+      case Parse.State.Stopped(Parse.State.Stopped.Reason.Pause) =>
+        session.sendEvent(new Events.StoppedEvent("pause", 1L))
+      case Parse.State.Stopped(Parse.State.Stopped.Reason.Step) =>
+        session.sendEvent(new Events.StoppedEvent("step", 1L))
+      case Parse.State.Stopped(Parse.State.Stopped.Reason.BreakpointHit(_)) =>
+        session.sendEvent(new Events.StoppedEvent("breakpoint", 1L))
+      case Parse.State.Running => IO.unit // ignore since users initiate continuing a stopped session
     }
   }
 
@@ -421,7 +425,9 @@ object DAPodil extends IOApp {
     val empty = DaffodilState(List.empty)
 
     /** Translate parse events to updated Daffodil state. */
-    def fromParse(frameIds: Frame.Id.Next): Stream[IO, Parse.Event] => Stream[IO, DaffodilState] =
+    def fromParse(
+        frameIds: Frame.Id.Next
+    ): Stream[IO, Parse.Event] => Stream[IO, DaffodilState] =
       events =>
         events.evalScan(empty) {
           case (_, Parse.Event.Init(_)) => IO.pure(empty)

@@ -4,7 +4,7 @@ import cats.Show
 import cats.effect._
 import cats.effect.std._
 import fs2._
-import fs2.concurrent.Signal
+import fs2.concurrent._
 import java.io.InputStream
 import java.net.URI
 import org.apache.daffodil.debugger.Debugger
@@ -19,6 +19,7 @@ import logging._
 /** A running Daffodil parse. */
 trait Parse {
   def events(): Stream[IO, Parse.Event]
+  def state(): Signal[IO, Parse.State]
 
   def step(): IO[Unit]
   def continue(): IO[Unit]
@@ -26,17 +27,17 @@ trait Parse {
 }
 
 object Parse {
-  def apply(
+  def resource(
       schema: URI,
       data: InputStream,
       compiler: Compiler,
-      breakpoints: Signal[IO, DAPodil.Breakpoints],
-      breakpointHit: DAPodil.Location => IO[Unit] // TODO: emit all kinds of events?
+      breakpoints: Ref[IO, DAPodil.Breakpoints]
   ): Resource[IO, Parse] =
     for {
       dispatcher <- Dispatcher[IO]
       queue <- Resource.eval(Queue.bounded[IO, Option[Event]](10)) // TODO: explore fs.Channel as alternative
-      state <- Resource.eval(State.initial(breakpoints, breakpointHit))
+      rs <- Resource.eval(SignallingRef[IO, State](State.Stopped(State.Stopped.Reason.Pause)))
+      control <- Resource.eval(Control.initial())
       debugger = new Debugger {
 
         override def init(pstate: PState, processor: Parser): Unit =
@@ -59,8 +60,17 @@ object Parse {
                   pstate.schemaFileLocation
                 )
               )
-            ) *> state.await(DAPodil.Location(pstate.schemaFileLocation)) // may block until external control says to unblock, for stepping behavior
+            ) *> checkBreakpoints(DAPodil.Location(pstate.schemaFileLocation)) *> control
+              .await() // may block until external control says to unblock, for stepping behavior
           }
+
+        def checkBreakpoints(location: DAPodil.Location): IO[Unit] =
+          for {
+            bp <- breakpoints.get
+            _ <- if (bp.contains(location))
+              control.pause() *> rs.set(State.Stopped(State.Stopped.Reason.BreakpointHit(location)))
+            else IO.unit
+          } yield ()
 
         override def endElement(pstate: PState, processor: Parser): Unit =
           dispatcher.unsafeRunSync {
@@ -89,13 +99,15 @@ object Parse {
         }
     } yield new Parse {
       def events(): Stream[IO, Event] = Stream.fromQueueNoneTerminated(queue)
+      def state(): Signal[IO, Parse.State] =
+        rs
 
-      def step(): IO[Unit] = state.step()
-      def continue(): IO[Unit] = state.continue()
-      def pause(): IO[Unit] = state.pause()
+      def step(): IO[Unit] = control.step() *> rs.set(State.Stopped(State.Stopped.Reason.Step))
+      def continue(): IO[Unit] = control.continue() *> rs.set(State.Running)
+      def pause(): IO[Unit] = control.pause() *> rs.set(State.Stopped(State.Stopped.Reason.Pause))
     }
 
-  /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
+  /** An algebraic data type that reifies the Daffodil `Debugger` callbacks and other events like stopping. */
   sealed trait Event
 
   object Event {
@@ -108,36 +120,47 @@ object Parse {
     implicit val show: Show[Event] = Show.fromToString
   }
 
-  sealed trait State {
-    def await(location: DAPodil.Location): IO[Unit]
+  sealed trait State
+
+  object State {
+    case object Running extends State
+    case class Stopped(reason: Stopped.Reason) extends State
+
+    object Stopped {
+      sealed trait Reason
+
+      object Reason {
+        case object Pause extends Reason
+        case object Step extends Reason
+        case class BreakpointHit(location: DAPodil.Location) extends Reason
+      }
+    }
+  }
+
+  sealed trait Control {
+    def await(): IO[Unit]
 
     def continue(): IO[Unit]
     def step(): IO[Unit]
     def pause(): IO[Unit]
   }
 
-  object State {
+  object Control {
 
-    sealed trait Mode
-    case object Running extends Mode
-    case class Stopped(whenContinued: Deferred[IO, Unit]) extends Mode
+    sealed trait State
+    case object Running extends State
+    case class Stopped(whenContinued: Deferred[IO, Unit]) extends State
 
-    def initial(breakpoints: Signal[IO, DAPodil.Breakpoints], breakpointHit: DAPodil.Location => IO[Unit]): IO[State] =
+    def initial(): IO[Control] =
       for {
         whenContinued <- Deferred[IO, Unit]
-        state <- Ref[IO].of[Mode](Stopped(whenContinued))
-      } yield new State {
-        def await(location: DAPodil.Location): IO[Unit] =
-          for {
-            nextContinue <- Deferred[IO, Unit]
-            bp <- breakpoints.get
-            _ <- state.modify {
-              case Running =>
-                if (bp.contains(location)) Stopped(nextContinue) -> (breakpointHit(location) *> nextContinue.get)
-                else Running -> IO.unit
-              case Stopped(whenContinued) => Stopped(whenContinued) -> whenContinued.get
-            }.flatten
-          } yield ()
+        state <- Ref[IO].of[State](Stopped(whenContinued))
+      } yield new Control {
+        def await(): IO[Unit] =
+          state.get.flatMap {
+            case Running                => IO.unit
+            case Stopped(whenContinued) => whenContinued.get
+          }
 
         def step(): IO[Unit] =
           for {
