@@ -88,15 +88,6 @@ class DAPodil(
       case extract(Command.PAUSE, _)                            => pause(request)
       case extract(Command.DISCONNECT, _)                       => disconnect(request)
       case _                                                    => IO(println(show"! unhandled request $request"))
-      case extract(Command.THREADS, _)                                   => threads(request)
-      case extract(Command.STACKTRACE, _)                                => stackTrace(request)
-      case extract(Command.SCOPES, args: ScopesArguments)                => scopes(request, args)
-      case extract(Command.VARIABLES, args: VariablesArguments)          => variables(request, args)
-      case extract(Command.NEXT, _)                                      => next(request)
-      case extract(Command.CONTINUE, _)                                  => continue(request)
-      case extract(Command.PAUSE, _)                                     => pause(request)
-      case extract(Command.DISCONNECT, _)                                => disconnect(request)
-      case _                                                             => IO(show"! unhandled request $request").debug().void
     }
 
   /** State.Uninitialized -> State.Initialized */
