@@ -1,13 +1,16 @@
 name := "daffodil-debugger"
 
-version := "0.1"
+git.useGitDescribe := true
 
 javacOptions ++= Seq("-source", "11")
 scalacOptions ++= Seq("-Ypartial-unification")
 scalaVersion := "2.12.13"
 
+// testing 3.1.0 release
+resolvers += "daffodil-staging" at "https://repository.apache.org/content/repositories/orgapachedaffodil-1020/"
+
 val zioVer = "1.0.6"
-val daffodilVer = "3.1.0-SNAPSHOT"
+val daffodilVer = "3.1.0"
 libraryDependencies := Seq(
   "com.microsoft.java" % "com.microsoft.java.debug.core" % "0.31.1",
   "co.fs2" %% "fs2-io" % "3.0.2",
@@ -40,3 +43,5 @@ lazy val javaFXModules = {
     .map(m => "org.openjfx" % s"javafx-$m" % "14.0.1" classifier osName)
 }
 libraryDependencies ++= javaFXModules
+
+enablePlugins(GitVersioning, JavaAppPackaging, UniversalPlugin)
