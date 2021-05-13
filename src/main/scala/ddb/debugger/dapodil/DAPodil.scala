@@ -10,8 +10,10 @@ import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
+import fs2.concurrent._
 import java.io._
 import java.net._
+import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.util.Misc
 
 import scala.collection.JavaConverters._
@@ -77,17 +79,7 @@ class DAPodil(
     request match {
       case extract(Command.INITIALIZE, _)                                => initialize(request)
       case extract(Command.LAUNCH, _)                                    => launch(request)
-      case extract(Command.INITIALIZE, _)                       => initialize(request)
-      case extract(Command.LAUNCH, _)                           => launch(request)
-      case extract(Command.THREADS, _)                          => threads(request)
-      case extract(Command.STACKTRACE, _)                       => stackTrace(request)
-      case extract(Command.SCOPES, args: ScopesArguments)       => scopes(request, args)
-      case extract(Command.VARIABLES, args: VariablesArguments) => variables(request, args)
-      case extract(Command.NEXT, _)                             => next(request)
-      case extract(Command.CONTINUE, _)                         => continue(request)
-      case extract(Command.PAUSE, _)                            => pause(request)
-      case extract(Command.DISCONNECT, _)                       => disconnect(request)
-      case _                                                    => IO(println(show"! unhandled request $request"))
+      case extract(Command.SETBREAKPOINTS, args: SetBreakpointArguments) => setBreakpoints(request, args)
       case extract(Command.THREADS, _)                                   => threads(request)
       case extract(Command.STACKTRACE, _)                                => stackTrace(request)
       case extract(Command.SCOPES, args: ScopesArguments)                => scopes(request, args)
@@ -118,8 +110,20 @@ class DAPodil(
         for {
           schema <- schemaURI
           data <- loadData.map(new ByteArrayInputStream(_))
-          parse = Parse(schema, data, compiler)
-          launched <- hotswap.swap(DAPodil.State.Launched.resource(session, schema, parse))
+
+          breakpoints <- SignallingRef[IO, DAPodil.Breakpoints](DAPodil.Breakpoints(Map.empty))
+          breakpointHits <- Channel.unbounded[IO, DAPodil.Location]
+          _ <- breakpointHits.stream
+            .evalTap { loc =>
+              IO(s"breakpoint hit: $loc").debug() *>
+              session.sendEvent(new Events.StoppedEvent("breakpoint", 1L))
+            }
+            .compile
+            .drain
+            .start // TODO: manage
+
+          parse = Parse(schema, data, compiler, breakpoints, location => breakpointHits.send(location).void)
+          launched <- hotswap.swap(DAPodil.State.Launched.resource(session, schema, parse, breakpoints))
 
           _ <- session.sendResponse(request.respondSuccess())
 
@@ -129,6 +133,25 @@ class DAPodil(
           _ <- state.set(launched)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
+    }
+
+  def setBreakpoints(request: Request, args: SetBreakpointArguments): IO[Unit] =
+    state.get.flatMap {
+      case launched: DAPodil.State.Launched =>
+        for {
+          _ <- launched.breakpoints.update(bp =>
+            bp.copy(value = bp.value + (DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp =>
+              DAPodil.Line(bp.line)
+            ))
+            )
+          )
+          breakpoints = args.breakpoints.toList.map(_ => new Types.Breakpoint(true))
+          response = request.respondSuccess(
+            new Responses.SetBreakpointsResponseBody(breakpoints.asJava)
+          )
+          _ <- session.sendResponse(response)
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
   def threads(request: Request): IO[Unit] = {
@@ -330,7 +353,8 @@ object DAPodil extends IOApp {
     case class Launched(
         schema: URI,
         parse: Parse,
-        state: Ref[IO, DaffodilState]
+        state: Ref[IO, DaffodilState],
+        breakpoints: SignallingRef[IO, Breakpoints]
     ) extends State {
       val stackTrace: IO[StackTrace] = state.get.map(_.stackTrace)
     }
@@ -339,7 +363,8 @@ object DAPodil extends IOApp {
       def resource(
           session: DAPSession[Response, DebugEvent],
           schema: URI,
-          parseResource: Resource[IO, Parse]
+          parseResource: Resource[IO, Parse],
+          breakpoints: SignallingRef[IO, Breakpoints]
       ): Resource[IO, Launched] =
         for {
           nextFrameId <- Resource.eval(DAPodil.Frame.Id.next)
@@ -358,7 +383,7 @@ object DAPodil extends IOApp {
                   session.sendEvent(new Events.TerminatedEvent())
             }
           launched <- Stream
-            .emit(Launched(schema, parse, current))
+            .emit(Launched(schema, parse, current, breakpoints))
             .concurrently(updateDaffodilState)
             .compile
             .resource
@@ -492,5 +517,20 @@ object DAPodil extends IOApp {
 
     implicit val show: Show[StackTrace] =
       st => st.frames.map(f => s"${f.line}:${f.column}").mkString("; ")
+  }
+
+  case class Path(value: String) extends AnyVal
+  case class Line(value: Int) extends AnyVal
+  case class Location(path: Path, line: Line)
+  object Location {
+    def apply(loc: SchemaFileLocation): Location =
+      Location(Path(loc.uriString.drop("file:".length)), Line(loc.lineNumber.map(_.toInt).getOrElse(0)))
+  }
+
+  case class Breakpoints(value: Map[Path, List[Line]]) {
+    def contains(location: Location): Boolean =
+      value.exists {
+        case (path, lines) => path == location.path && lines.exists(_ == location.line)
+      }
   }
 }

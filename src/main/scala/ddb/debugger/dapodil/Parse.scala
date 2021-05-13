@@ -4,6 +4,7 @@ import cats.Show
 import cats.effect._
 import cats.effect.std._
 import fs2._
+import fs2.concurrent.Signal
 import java.io.InputStream
 import java.net.URI
 import org.apache.daffodil.debugger.Debugger
@@ -28,12 +29,14 @@ object Parse {
   def apply(
       schema: URI,
       data: InputStream,
-      compiler: Compiler
+      compiler: Compiler,
+      breakpoints: Signal[IO, DAPodil.Breakpoints],
+      breakpointHit: DAPodil.Location => IO[Unit] // TODO: emit all kinds of events?
   ): Resource[IO, Parse] =
     for {
       dispatcher <- Dispatcher[IO]
       queue <- Resource.eval(Queue.bounded[IO, Option[Event]](10)) // TODO: explore fs.Channel as alternative
-      state <- Resource.eval(State.initial)
+      state <- Resource.eval(State.initial(breakpoints, breakpointHit))
       debugger = new Debugger {
 
         override def init(pstate: PState, processor: Parser): Unit =
@@ -56,7 +59,7 @@ object Parse {
                   pstate.schemaFileLocation
                 )
               )
-            ) *> state.await // blocks until external control says to unblock, for stepping behavior
+            ) *> state.await(DAPodil.Location(pstate.schemaFileLocation)) // may block until external control says to unblock, for stepping behavior
           }
 
         override def endElement(pstate: PState, processor: Parser): Unit =
@@ -106,7 +109,7 @@ object Parse {
   }
 
   sealed trait State {
-    def await(): IO[Unit]
+    def await(location: DAPodil.Location): IO[Unit]
 
     def continue(): IO[Unit]
     def step(): IO[Unit]
@@ -119,23 +122,29 @@ object Parse {
     case object Running extends Mode
     case class Stopped(whenContinued: Deferred[IO, Unit]) extends Mode
 
-    def initial(): IO[State] =
+    def initial(breakpoints: Signal[IO, DAPodil.Breakpoints], breakpointHit: DAPodil.Location => IO[Unit]): IO[State] =
       for {
         whenContinued <- Deferred[IO, Unit]
         state <- Ref[IO].of[Mode](Stopped(whenContinued))
       } yield new State {
-        def await(): IO[Unit] =
-          state.get.flatMap {
-            case Running                => IO.unit
-            case Stopped(whenContinued) => whenContinued.get
-          }
+        def await(location: DAPodil.Location): IO[Unit] =
+          for {
+            nextContinue <- Deferred[IO, Unit]
+            bp <- breakpoints.get
+            _ <- state.modify {
+              case Running =>
+                if (bp.contains(location)) Stopped(nextContinue) -> (breakpointHit(location) *> nextContinue.get)
+                else Running -> IO.unit
+              case Stopped(whenContinued) => Stopped(whenContinued) -> whenContinued.get
+            }.flatten
+          } yield ()
 
         def step(): IO[Unit] =
           for {
             nextContinue <- Deferred[IO, Unit]
             _ <- state.modify {
-              case Running                => Running -> IO.unit
-              case Stopped(whenContinued) => Stopped(nextContinue) -> whenContinued.complete(())
+              case Running    => Running -> IO.unit
+              case Stopped(_) => Stopped(nextContinue) -> whenContinued.complete(())
             }.flatten
           } yield ()
 
