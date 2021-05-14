@@ -7,7 +7,7 @@ scalacOptions ++= Seq("-Ypartial-unification")
 scalaVersion := "2.12.13"
 
 // testing 3.1.0 release
-resolvers += "daffodil-staging" at "https://repository.apache.org/content/repositories/orgapachedaffodil-1020/"
+resolvers += "daffodil-staging" at "https://repository.apache.org/content/repositories/orgapachedaffodil-1023/"
 
 val zioVer = "1.0.6"
 val daffodilVer = "3.1.0"
