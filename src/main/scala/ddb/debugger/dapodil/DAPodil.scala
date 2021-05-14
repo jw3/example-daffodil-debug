@@ -1,5 +1,6 @@
 package ddb.debugger.dapodil
 
+import cats.data._
 import cats.effect._
 import cats.effect.kernel.Ref
 import cats.effect.std._
@@ -12,6 +13,7 @@ import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
 import java.io._
 import java.net._
+import java.nio.file.Paths
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
@@ -48,10 +50,6 @@ class DAPodil(
     compiler: Compiler,
     whenDone: Deferred[IO, Unit]
 ) extends DAPodil.RequestHandler {
-  // TODO: the DAP server will tell us what schema and data to "debug"
-  val schemaURI = IO.blocking(getClass.getResource("/jpeg.dfdl.xsd").toURI)
-  val loadData = IO.blocking(getClass.getResourceAsStream("/works.jpg").readAllBytes())
-
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   /** Extension methods to create responses from requests. */
@@ -63,8 +61,10 @@ class DAPodil(
       response
     }
 
-    def respondFailure(): Response =
-      new Response(request.seq, request.command, false)
+    def respondFailure(message: Option[String] = None): Response =
+      message.fold(new Response(request.seq, request.command, false))(
+        new Response(request.seq, request.command, false, _)
+      )
   }
 
   /** Extract a typed command from a string discriminator.
@@ -82,8 +82,17 @@ class DAPodil(
   /** Respond to requests and optionally update the current state. */
   def handle(request: Request): IO[Unit] =
     request match {
-      case extract(Command.INITIALIZE, _)                                => initialize(request)
-      case extract(Command.LAUNCH, _)                                    => launch(request)
+      case extract(Command.INITIALIZE, _) => initialize(request)
+      case extract(Command.LAUNCH, _)     =>
+        // We ignore the java-debug LaunchArguments because it is overspecialized for JVM debugging, and parse our own LaunchArgs type.
+        DAPodil.LaunchArgs
+          .parse(request)
+          .fold(
+            errors =>
+              Logger[IO].warn(show"error parsing launch args: ${errors.mkString_(", ")}") *> session
+                .sendResponse(request.respondFailure(Some(show"error parsing launch args: ${errors.mkString_(", ")}"))),
+            args => launch(request, args)
+          )
       case extract(Command.SETBREAKPOINTS, args: SetBreakpointArguments) => setBreakpoints(request, args)
       case extract(Command.THREADS, _)                                   => threads(request)
       case extract(Command.STACKTRACE, _)                                => stackTrace(request)
@@ -93,7 +102,7 @@ class DAPodil(
       case extract(Command.CONTINUE, _)                                  => continue(request)
       case extract(Command.PAUSE, _)                                     => pause(request)
       case extract(Command.DISCONNECT, _)                                => disconnect(request)
-      case _                                                             => Logger[IO].warn(show"unhandled request $request")
+      case _                                                             => Logger[IO].warn(show"unhandled request $request") *> session.sendResponse(request.respondFailure())
     }
 
   /** State.Uninitialized -> State.Initialized */
@@ -108,13 +117,15 @@ class DAPodil(
     }.flatten
 
   /** State.Initialized -> State.Launched */
-  def launch(request: Request): IO[Unit] =
+  def launch(request: Request, args: DAPodil.LaunchArgs): IO[Unit] =
     // TODO: ensure `launch` is atomic
     state.get.flatMap {
       case DAPodil.State.Initialized =>
         for {
-          schema <- schemaURI
-          data <- loadData.map(new ByteArrayInputStream(_))
+          schema <- IO.blocking(Paths.get(args.schemaPath).toUri)
+          data <- IO
+            .blocking(new FileInputStream(Paths.get(args.dataPath).toFile).readAllBytes())
+            .map(new ByteArrayInputStream(_))
 
           breakpoints <- Ref[IO].of(DAPodil.Breakpoints(Map.empty))
 
@@ -265,7 +276,7 @@ class DAPodil(
           _ <- response.fold(
             Logger[IO]
               .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") *> // TODO: handle better
-              session.sendResponse(request.respondFailure)
+              session.sendResponse(request.respondFailure())
           )(session.sendResponse)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -308,6 +319,20 @@ object DAPodil extends IOApp {
       dapodil = new DAPodil(DAPSession(server), state, hotswap, compiler, whenDone)
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
+
+  case class LaunchArgs(schemaPath: String, dataPath: String) extends Arguments
+
+  object LaunchArgs {
+    def parse(request: Request): ValidatedNel[String, LaunchArgs] =
+      (
+        Option(request.arguments.getAsJsonPrimitive("program"))
+          .map(_.getAsString)
+          .toValidNel("missing 'program' field from launch request"),
+        Option(request.arguments.getAsJsonPrimitive("data"))
+          .map(_.getAsString)
+          .toValidNel("missing 'data' field from launch request")
+      ).mapN(LaunchArgs.apply)
+  }
 
   trait RequestHandler {
     def handle(request: Request): IO[Unit]
