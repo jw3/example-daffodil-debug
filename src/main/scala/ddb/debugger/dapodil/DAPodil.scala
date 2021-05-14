@@ -12,6 +12,7 @@ import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
 import java.io._
 import java.net._
+import java.nio.file.Paths
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
@@ -20,8 +21,6 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scala.collection.JavaConverters._
 
 import logging._
-
-import java.nio.file.Paths
 
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
