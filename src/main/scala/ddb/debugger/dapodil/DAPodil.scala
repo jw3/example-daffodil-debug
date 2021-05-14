@@ -323,15 +323,15 @@ object DAPodil extends IOApp {
   case class LaunchArgs(schemaPath: String, dataPath: String) extends Arguments
 
   object LaunchArgs {
-    def parse(request: Request): ValidatedNel[String, LaunchArgs] =
+    def parse(request: Request): EitherNel[String, LaunchArgs] =
       (
         Option(request.arguments.getAsJsonPrimitive("program"))
           .map(_.getAsString)
-          .toValidNel("missing 'program' field from launch request"),
+          .toRightNel("missing 'program' field from launch request"),
         Option(request.arguments.getAsJsonPrimitive("data"))
           .map(_.getAsString)
-          .toValidNel("missing 'data' field from launch request")
-      ).mapN(LaunchArgs.apply)
+          .toRightNel("missing 'data' field from launch request")
+      ).parMapN(LaunchArgs.apply)
   }
 
   trait RequestHandler {
