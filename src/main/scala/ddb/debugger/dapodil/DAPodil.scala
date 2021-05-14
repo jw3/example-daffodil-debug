@@ -60,8 +60,10 @@ class DAPodil(
       response
     }
 
-    def respondFailure(): Response =
-      new Response(request.seq, request.command, false)
+    def respondFailure(message: Option[String] = None): Response =
+      message.fold(new Response(request.seq, request.command, false))(
+        new Response(request.seq, request.command, false, _)
+      )
   }
 
   /** Extract a typed command from a string discriminator.
@@ -269,7 +271,7 @@ class DAPodil(
           _ <- response.fold(
             Logger[IO]
               .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") *> // TODO: handle better
-              session.sendResponse(request.respondFailure)
+              session.sendResponse(request.respondFailure())
           )(session.sendResponse)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
