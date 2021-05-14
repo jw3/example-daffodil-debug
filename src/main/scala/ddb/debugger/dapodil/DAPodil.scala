@@ -21,6 +21,8 @@ import scala.collection.JavaConverters._
 
 import logging._
 
+import java.nio.file.Paths
+
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
   def sendResponse(response: R): IO[Unit]
@@ -48,10 +50,6 @@ class DAPodil(
     compiler: Compiler,
     whenDone: Deferred[IO, Unit]
 ) extends DAPodil.RequestHandler {
-  // TODO: the DAP server will tell us what schema and data to "debug"
-  val schemaURI = IO.blocking(getClass.getResource("/jpeg.dfdl.xsd").toURI)
-  val loadData = IO.blocking(getClass.getResourceAsStream("/works.jpg").readAllBytes())
-
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   /** Extension methods to create responses from requests. */
@@ -107,14 +105,21 @@ class DAPodil(
       case s => s -> IO.raiseError(new RuntimeException("can only initialize when uninitialized"))
     }.flatten
 
+  case class ProgramArgs(schema: String, data: String)
+  def extractProgramAndData(request: Request): Option[ProgramArgs] = for {
+    schema <- Option(request.arguments.getAsJsonPrimitive("program")).map(_.getAsString)
+    data <- Option(request.arguments.getAsJsonPrimitive("data")).map(_.getAsString)
+  } yield ProgramArgs(schema, data)
+
   /** State.Initialized -> State.Launched */
   def launch(request: Request): IO[Unit] =
     // TODO: ensure `launch` is atomic
     state.get.flatMap {
       case DAPodil.State.Initialized =>
         for {
-          schema <- schemaURI
-          data <- loadData.map(new ByteArrayInputStream(_))
+          pargs <- IO.fromOption(extractProgramAndData(request))(new RuntimeException("failed to parse program args"))
+          schema <- IO.blocking(Paths.get(pargs.schema).toUri)
+          data <- IO.blocking(new FileInputStream(Paths.get(pargs.data).toFile).readAllBytes()).map(new ByteArrayInputStream(_))
 
           breakpoints <- Ref[IO].of(DAPodil.Breakpoints(Map.empty))
 
