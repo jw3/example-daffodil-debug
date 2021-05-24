@@ -562,9 +562,12 @@ object DAPodil extends IOApp {
   case class Path(value: String) extends AnyVal
   case class Line(value: Int) extends AnyVal
   case class Location(path: Path, line: Line)
+
   object Location {
     def apply(loc: SchemaFileLocation): Location =
-      Location(Path(loc.uriString.drop("file:".length)), Line(loc.lineNumber.map(_.toInt).getOrElse(0)))
+      Location(Path(new URI(loc.uriString).getPath), Line(loc.lineNumber.map(_.toInt).getOrElse(0)))
+
+    implicit val show: Show[Location] = Show.fromToString
   }
 
   case class Breakpoints(value: Map[Path, List[Line]]) {
