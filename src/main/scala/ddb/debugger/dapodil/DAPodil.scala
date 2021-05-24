@@ -576,4 +576,8 @@ object DAPodil extends IOApp {
         case (path, lines) => path == location.path && lines.exists(_ == location.line)
       }
   }
+
+  object Breakpoints {
+    implicit val show: Show[Breakpoints] = Show.fromToString
+  }
 }
