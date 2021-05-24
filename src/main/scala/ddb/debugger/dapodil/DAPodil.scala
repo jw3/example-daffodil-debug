@@ -148,10 +148,12 @@ class DAPodil(
     state.get.flatMap {
       case launched: DAPodil.State.Launched =>
         for {
-          _ <- launched.debugee.setBreakpoints(DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp =>
-              DAPodil.Line(bp.line)
-            ))
-          breakpoints = args.breakpoints.toList.map(_ => new Types.Breakpoint(true))
+          _ <- launched.debugee.setBreakpoints(
+            DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp => DAPodil.Line(bp.line))
+          )
+          breakpoints = args.breakpoints.toList.zipWithIndex.map {
+            case (bp, i) => new Types.Breakpoint(i, true, bp.line, "")
+          }
           response = request.respondSuccess(
             new Responses.SetBreakpointsResponseBody(breakpoints.asJava)
           )
