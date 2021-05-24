@@ -168,8 +168,8 @@ object Parse {
           for {
             nextContinue <- Deferred[IO, Unit]
             _ <- state.modify {
-              case Running    => Running -> IO.unit
-              case Stopped(_) => Stopped(nextContinue) -> whenContinued.complete(())
+              case Running                => Running -> IO.unit
+              case Stopped(whenContinued) => Stopped(nextContinue) -> whenContinued.complete(())
             }.flatten
           } yield ()
 
