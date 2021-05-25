@@ -188,7 +188,7 @@ object Parse {
       } yield Misc.remapStringToVisibleGlyphs(f)
     )
 
-  /** An algebraic data type that reifies the Daffodil `Debugger` callbacks and other events like stopping. */
+  /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
 
   object Event {
