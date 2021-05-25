@@ -11,7 +11,7 @@ trait Compiler {
 }
 
 object Compiler {
-  def apply: Compiler =
+  def apply(): Compiler =
     new Compiler {
       def compile(schema: URI): IO[DataProcessor] =
         IO.blocking(
