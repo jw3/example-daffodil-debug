@@ -239,29 +239,9 @@ class DAPodil(
           response = state.stack
             .find(_.stackFrame.id == args.variablesReference)
             .map {
-              case DAPodil.Frame(
-                  _,
-                  dataOffset,
-                  childIndex,
-                  groupIndex,
-                  occursIndex,
-                  hidden,
-                  foundDelimiter,
-                  foundField
-                  ) =>
+              case DAPodil.Frame(_, variables) =>
                 request.respondSuccess(
-                  new Responses.VariablesResponseBody(
-                    (List(
-                      new Types.Variable("bytePos1b", dataOffset.toString, "number", 0, null),
-                      new Types.Variable("hidden", hidden.toString, "bool", 0, null)
-                    ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
-                      ++ groupIndex.map(gi => new Types.Variable("groupIndex", gi.toString)).toList
-                      ++ occursIndex.map(oi => new Types.Variable("occursIndex", oi.toString)).toList
-                      ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
-                      ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
-                      .sortBy(_.name)
-                      .asJava
-                  )
+                  new Responses.VariablesResponseBody(variables.asJava)
                 )
             }
           _ <- response.fold(
@@ -301,7 +281,8 @@ object DAPodil extends IOApp {
           debugee <- Parse.resource(schema, data, Compiler())
         } yield debugee
 
-      _ <- DAPodil.resource(socket, debugee)
+      _ <- DAPodil
+        .resource(socket, debugee)
         .use(whenDone => whenDone *> Logger[IO].debug("whenDone: completed"))
       _ <- Logger[IO].info(s"disconnected at $uri")
     } yield ExitCode.Success
@@ -478,17 +459,7 @@ object DAPodil extends IOApp {
     val empty = Data(List.empty)
   }
 
-  // TODO: move out daffodil-specific fields
-  case class Frame(
-      stackFrame: Types.StackFrame,
-      dataOffset: Long,
-      childIndex: Option[Long],
-      groupIndex: Option[Long],
-      occursIndex: Option[Long],
-      hidden: Boolean,
-      foundDelimiter: Option[String],
-      foundField: Option[String]
-  )
+  case class Frame(stackFrame: Types.StackFrame, variables: List[Types.Variable])
 
   object Frame {
 
@@ -510,10 +481,7 @@ object DAPodil extends IOApp {
         }
     }
 
-    implicit val show: Show[Frame] = {
-      case Frame(stackFrame, dataOffset, childIndex, groupIndex, occursIndex, hidden, foundDelimiter, foundField) =>
-        show"Frame(${stackFrame.id}:${stackFrame.name}, $dataOffset, $childIndex, $groupIndex, $occursIndex, $hidden, $foundDelimiter, $foundField)"
-    }
+    implicit val show: Show[Frame] = Show.fromToString
   }
 
   case class StackTrace(frames: List[Types.StackFrame]) {

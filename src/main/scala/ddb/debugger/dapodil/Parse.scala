@@ -154,39 +154,55 @@ object Parse {
     *
     * @see https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
     */
-  def createFrame(startElement: Parse.Event.StartElement, id: DAPodil.Frame.Id): DAPodil.Frame =
-    DAPodil.Frame(
-      new Types.StackFrame(
-        /* It must be unique across all threads.
-         * This id can be used to retrieve the scopes of the frame with the
-         * 'scopesRequest' or to restart the execution of a stackframe.
-         */
-        id.value,
-        startElement.name.getOrElse("???"),
-        /* If sourceReference > 0 the contents of the source must be retrieved through
-         * the SourceRequest (even if a path is specified). */
-        new Types.Source(startElement.schemaLocation.uriString, 0),
-        startElement.schemaLocation.lineNumber
-          .map(_.toInt)
-          .getOrElse(1), // line numbers start at 1 according to InitializeRequest
-        startElement.schemaLocation.columnNumber
-          .map(_.toInt)
-          .getOrElse(1) // column numbers start at 1 according to InitializeRequest
-      ),
-      dataOffset = startElement.state.currentLocation.bytePos1b,
-      childIndex = if (startElement.state.childPos != -1) Some(startElement.state.childPos) else None,
-      groupIndex = if (startElement.state.groupPos != -1) Some(startElement.state.groupPos) else None,
-      occursIndex = if (startElement.state.arrayPos != -1) Some(startElement.state.arrayPos) else None,
-      hidden = startElement.state.withinHiddenNest,
-      foundDelimiter = for {
-        dpr <- startElement.state.delimitedParseResult.toScalaOption
-        dv <- dpr.matchedDelimiterValue.toScalaOption
-      } yield Misc.remapStringToVisibleGlyphs(dv),
-      foundField = for {
-        dpr <- startElement.state.delimitedParseResult.toScalaOption
-        f <- dpr.field.toScalaOption
-      } yield Misc.remapStringToVisibleGlyphs(f)
+  def createFrame(startElement: Parse.Event.StartElement, id: DAPodil.Frame.Id): DAPodil.Frame = {
+    val stackFrame = new Types.StackFrame(
+      /* It must be unique across all threads.
+       * This id can be used to retrieve the scopes of the frame with the
+       * 'scopesRequest' or to restart the execution of a stackframe.
+       */
+      id.value,
+      startElement.name.getOrElse("???"),
+      /* If sourceReference > 0 the contents of the source must be retrieved through
+       * the SourceRequest (even if a path is specified). */
+      new Types.Source(startElement.schemaLocation.uriString, 0),
+      startElement.schemaLocation.lineNumber
+        .map(_.toInt)
+        .getOrElse(1), // line numbers start at 1 according to InitializeRequest
+      startElement.schemaLocation.columnNumber
+        .map(_.toInt)
+        .getOrElse(1) // column numbers start at 1 according to InitializeRequest
     )
+    val bytePos1b = startElement.state.currentLocation.bytePos1b
+    val hidden = startElement.state.withinHiddenNest
+    val childIndex = if (startElement.state.childPos != -1) Some(startElement.state.childPos) else None
+    val groupIndex = if (startElement.state.groupPos != -1) Some(startElement.state.groupPos) else None
+    val occursIndex = if (startElement.state.arrayPos != -1) Some(startElement.state.arrayPos) else None
+    val foundDelimiter = for {
+      dpr <- startElement.state.delimitedParseResult.toScalaOption
+      dv <- dpr.matchedDelimiterValue.toScalaOption
+    } yield Misc.remapStringToVisibleGlyphs(dv)
+    val foundField = for {
+      dpr <- startElement.state.delimitedParseResult.toScalaOption
+      f <- dpr.field.toScalaOption
+    } yield Misc.remapStringToVisibleGlyphs(f)
+
+    DAPodil.Frame(
+      stackFrame,
+      (List(
+        new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null),
+        new Types.Variable("hidden", hidden.toString, "bool", 0, null)
+      ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
+        ++ groupIndex
+          .map(gi => new Types.Variable("groupIndex", gi.toString))
+          .toList
+        ++ occursIndex
+          .map(oi => new Types.Variable("occursIndex", oi.toString))
+          .toList
+        ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
+        ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
+        .sortBy(_.name)
+    )
+  }
 
   /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
