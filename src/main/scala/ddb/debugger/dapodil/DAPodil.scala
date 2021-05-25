@@ -41,12 +41,12 @@ object DAPSession {
     }
 }
 
-/** Reacts to incoming DAP requests to debug Daffodil schema data processing. */
+/** Connect a debugee to an external debugger via DAP. */
 class DAPodil(
     session: DAPSession[Response, DebugEvent],
     state: Ref[IO, DAPodil.State],
     hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resouce management
-    compiler: Compiler,
+    debugee: DAPodil.LaunchArgs => Resource[IO, DAPodil.Debugee],
     whenDone: Deferred[IO, Unit]
 ) extends DAPodil.RequestHandler {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
@@ -121,16 +121,10 @@ class DAPodil(
     state.get.flatMap {
       case DAPodil.State.Initialized =>
         for {
-          schema <- IO.blocking(Paths.get(args.schemaPath).toUri)
-          data <- IO
-            .blocking(new FileInputStream(Paths.get(args.dataPath).toFile).readAllBytes())
-            .map(new ByteArrayInputStream(_))
-
           launched <- hotswap.swap {
             for {
-              parse <- Parse
-                .resource(schema, data, compiler)
-              launched <- DAPodil.State.Launched.resource(session, schema, parse)
+              dbgee <- debugee(args)
+              launched <- DAPodil.State.Launched.resource(session, dbgee)
             } yield launched
           }
 
@@ -297,23 +291,31 @@ object DAPodil extends IOApp {
       socket <- IO(serverSocket.accept())
       _ <- Logger[IO].info(s"connected at $uri")
 
-      _ <- DAPodil
-        .resource(socket)
+      debugee = (args: DAPodil.LaunchArgs) =>
+        for {
+          schema <- Resource.eval(IO.blocking(Paths.get(args.schemaPath).toUri))
+          data <- Resource.eval(
+            IO.blocking(new FileInputStream(Paths.get(args.dataPath).toFile).readAllBytes())
+              .map(new ByteArrayInputStream(_))
+          )
+          debugee <- Parse.resource(schema, data, Compiler())
+        } yield debugee
+
+      _ <- DAPodil.resource(socket, debugee)
         .use(whenDone => whenDone *> Logger[IO].debug("whenDone: completed"))
       _ <- Logger[IO].info(s"disconnected at $uri")
     } yield ExitCode.Success
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def resource(socket: Socket): Resource[IO, IO[Unit]] =
+  def resource(socket: Socket, debugee: LaunchArgs => Resource[IO, Debugee]): Resource[IO, IO[Unit]] =
     for {
       dispatcher <- Dispatcher[IO]
       requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
       server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
       state <- Resource.eval(Ref[IO].of[State](State.Unitialized))
       hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => Logger[IO].debug(s"hotswap: $ec"))
-      compiler = Compiler.apply
       whenDone <- Resource.eval(Deferred[IO, Unit])
-      dapodil = new DAPodil(DAPSession(server), state, hotswap, compiler, whenDone)
+      dapodil = new DAPodil(DAPSession(server), state, hotswap, debugee, whenDone)
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
 
@@ -402,17 +404,13 @@ object DAPodil extends IOApp {
   object State {
     case object Unitialized extends State
     case object Initialized extends State
-    case class Launched(
-        schema: URI,
-        debugee: Debugee
-    ) extends State {
+    case class Launched(debugee: Debugee) extends State {
       val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stackTrace)
     }
 
     object Launched {
       def resource(
           session: DAPSession[Response, DebugEvent],
-          schema: URI,
           debugee: Debugee
       ): Resource[IO, Launched] =
         for {
@@ -431,7 +429,7 @@ object DAPodil extends IOApp {
             }
 
           launched <- Stream
-            .emit(Launched(schema, debugee))
+            .emit(Launched(debugee))
             .concurrently(stoppedEventsDelivery)
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
