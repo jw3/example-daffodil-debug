@@ -30,7 +30,7 @@ object Parse {
   ): Resource[IO, DAPodil.Debugee] =
     for {
       dispatcher <- Dispatcher[IO]
-      // TODO: explore fs.Channel as alternative to Queue
+      // TODO: explore fs2.Channel as alternative to Queue
       parseEvents <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
       parseState <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
       control <- Resource.eval(Control.initial())
