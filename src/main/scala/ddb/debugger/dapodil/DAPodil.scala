@@ -103,6 +103,7 @@ class DAPodil(
       case extract(Command.CONTINUE, _)                                  => continue(request)
       case extract(Command.PAUSE, _)                                     => pause(request)
       case extract(Command.DISCONNECT, args: DisconnectArguments)        => disconnect(request, args)
+      case extract(Command.EVALUATE, args: EvaluateArguments)            => eval(request, args)
       case _                                                             => Logger[IO].warn(show"unhandled request $request") *> session.sendResponse(request.respondFailure())
     }
 
@@ -241,8 +242,8 @@ class DAPodil(
       case DAPodil.State.Launched(debugee) =>
         for {
           data <- debugee.data().get
-          _ <- data.stack.frames
-            .find(_.stackFrame.id == args.frameId)
+          _ <- data.stack
+            .findFrame(DAPodil.Frame.Id(args.frameId))
             .fold(
               session.sendResponse(request.respondFailure(Some(s"couldn't find scopes for frame ${args.frameId}")))
             ) { frame =>
@@ -261,7 +262,7 @@ class DAPodil(
         for {
           data <- debugee.data.get
           _ <- data.stack
-            .find(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
+            .findVariables(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
             .fold(
               Logger[IO]
                 .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${data}") *> // TODO: handle better
@@ -269,6 +270,20 @@ class DAPodil(
             )(variables =>
               session.sendResponse(request.respondSuccess(new Responses.VariablesResponseBody(variables.asJava)))
             )
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
+    }
+
+  def eval(request: Request, args: EvaluateArguments): IO[Unit] =
+    state.get.flatMap {
+      case launched: DAPodil.State.Launched =>
+        for {
+          variable <- launched.debugee.eval(args)
+          _ <- variable match {
+            case None => session.sendResponse(request.respondFailure())
+            case Some(v) =>
+              session.sendResponse(request.respondSuccess(new Responses.EvaluateResponseBody(v.value, 0, null, 0)))
+          }
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -403,6 +418,7 @@ object DAPodil extends IOApp {
     def continue(): IO[Unit]
     def pause(): IO[Unit]
     def setBreakpoints(breakpoints: (Path, List[Line])): IO[Unit]
+    def eval(args: EvaluateArguments): IO[Option[Types.Variable]]
   }
 
   object Debugee {
@@ -503,7 +519,7 @@ object DAPodil extends IOApp {
     val empty: Data = Data(StackTrace.empty)
   }
 
-  case class Frame(stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
+  case class Frame(id: Frame.Id, stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
     def find(reference: Frame.Scope.VariablesReference): Option[Frame.Scope] =
       scopes.find(_.reference == reference)
   }
@@ -537,7 +553,10 @@ object DAPodil extends IOApp {
     def pop(): StackTrace =
       copy(frames.tail)
 
-    def find(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
+    def findFrame(frameId: Frame.Id): Option[Frame] =
+      frames.find(_.id == frameId)
+
+    def findVariables(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
       frames.collectFirstSome(_.find(reference)).map(_.variables)
   }
 

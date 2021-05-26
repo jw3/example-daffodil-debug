@@ -18,6 +18,12 @@ import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import com.microsoft.java.debug.core.protocol.Requests.EvaluateArguments
+import org.apache.daffodil.infoset.DIDocument
+import org.apache.daffodil.infoset.InfosetElement
+import org.apache.daffodil.infoset.XMLTextInfosetOutputter
+import org.apache.daffodil.infoset.InfosetWalker
+import org.apache.daffodil.infoset.DIElement
 
 /** A running Daffodil parse. */
 object Parse {
@@ -37,7 +43,17 @@ object Parse {
       previousState <- Resource.eval(Ref[IO].of[Option[StateForDebugger]](None))
       control <- Resource.eval(Control.initial())
       breakpoints <- Resource.eval(Ref[IO].of(DAPodil.Breakpoints.empty))
-      debugger = new Daffodil(dispatcher, parseEvents, previousState, parseState, control, outputEvents, breakpoints)
+      infoset <- Resource.eval(Ref[IO].of[Option[String]](None)) // TODO: infoset isn't global, it's per-stack-frame(?)
+      debugger = new Daffodil(
+        dispatcher,
+        parseEvents,
+        previousState,
+        parseState,
+        control,
+        outputEvents,
+        breakpoints,
+        infoset
+      )
       dp <- Resource.eval(compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true)))
       _ <- IO
         .interruptible(true) { // if necessary, kill this thread with extreme prejudice
@@ -93,6 +109,24 @@ object Parse {
 
       def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
         breakpoints.update(bp => bp.copy(value = bp.value + args))
+
+      def eval(args: EvaluateArguments): IO[Option[Types.Variable]] =
+        args.expression match {
+          case "infoset" =>
+            infoset.get.map {
+              case Some(i) => Some(new Types.Variable("infoset", i))
+              case None    => None
+            }
+          case name => // check all variables in the given frame
+            data().get.map { data =>
+              for {
+                frame <- data.stack.findFrame(DAPodil.Frame.Id(args.frameId))
+                variable <- frame.scopes.collectFirstSome { scope =>
+                  scope.variables.find(_.name == name)
+                }
+              } yield variable
+            }
+        }
     }
 
   /** Translate parse events to updated Daffodil state. */
@@ -181,6 +215,7 @@ object Parse {
       List(new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null))
 
     DAPodil.Frame(
+      id,
       stackFrame,
       List(
         DAPodil.Frame.Scope(
@@ -268,7 +303,8 @@ object Parse {
       parseState: Queue[IO, Option[DAPodil.Debugee.State]],
       control: Control,
       outputEvents: Queue[IO, Option[Events.OutputEvent]],
-      breakpoints: Ref[IO, DAPodil.Breakpoints]
+      breakpoints: Ref[IO, DAPodil.Breakpoints],
+      infoset: Ref[IO, Option[String]]
   ) extends Debugger {
 
     override def init(pstate: PState, processor: Parser): Unit =
@@ -301,7 +337,8 @@ object Parse {
             .await()
             .ifM(sendOutput(pstate), IO.unit) *> // if we are stepping, send output events, otherwise no-op
           logger.debug("post-control await") *>
-          previousState.set(Some(pstate.copyStateForDebugger))
+          previousState.set(Some(pstate.copyStateForDebugger)) *>
+          infoset.set(extractInfoset(pstate))
       }
 
     def sendOutput(state: PState): IO[Unit] =
@@ -330,5 +367,36 @@ object Parse {
       dispatcher.unsafeRunSync {
         parseEvents.offer(Some(Event.EndElement(pstate.copyStateForDebugger)))
       }
+
+    def extractInfoset(pstate: PState): Option[String] =
+      if (pstate.hasInfoset) {
+        var parentSteps = Int.MaxValue
+        var node = pstate.infoset
+
+        while (parentSteps > 0 && node.diParent != null) {
+          node = node.diParent
+          parentSteps -= 1
+        }
+
+        node match {
+          case d: DIDocument if d.contents.size == 0 => None
+          case _                                     => Some(infosetToString(node))
+        }
+      } else None
+
+    private def infosetToString(ie: InfosetElement): String = {
+      val bos = new java.io.ByteArrayOutputStream()
+      val xml = new XMLTextInfosetOutputter(bos, true)
+      val iw = InfosetWalker(
+        ie.asInstanceOf[DIElement],
+        xml,
+        walkHidden = true,
+        ignoreBlocks = true,
+        releaseUnneededInfoset = false
+      )
+      iw.walk(lastWalk = true)
+      bos.toString("UTF-8")
+    }
+
   }
 }
