@@ -353,6 +353,7 @@ object DAPodil extends IOApp {
   trait Debugee {
     def data(): Signal[IO, Data]
     def state(): Stream[IO, Debugee.State]
+    def outputs(): Stream[IO, Events.OutputEvent]
 
     def step(): IO[Unit]
     def continue(): IO[Unit]
@@ -399,7 +400,7 @@ object DAPodil extends IOApp {
 
           stoppedEventsDelivery = debugee.state
             .collect { case s: Debugee.State.Stopped => s }
-            .evalTap(deliverStoppedEvents(session))
+            .evalMap(deliverStoppedEvents(session))
             .onFinalizeCase {
               case ec @ kernel.Resource.ExitCase.Errored(t) =>
                 Logger[IO].debug(s"deliverStoppedEvents: $ec") *> IO(t.printStackTrace())
@@ -409,9 +410,11 @@ object DAPodil extends IOApp {
                   session.sendEvent(new Events.TerminatedEvent())
             }
 
+          outputEventsDelivery = debugee.outputs.evalMap(session.sendEvent)
+
           launched <- Stream
             .emit(Launched(debugee))
-            .concurrently(stoppedEventsDelivery)
+            .concurrently(stoppedEventsDelivery.merge(outputEventsDelivery))
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
             .resource
