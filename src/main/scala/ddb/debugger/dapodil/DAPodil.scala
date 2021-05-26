@@ -351,6 +351,7 @@ object DAPodil extends IOApp {
 
   /** DAPodil launches the debugee which reports its state and handles debug commands. */
   trait Debugee {
+    // TODO: extract "control" interface from "state" interface
     def data(): Signal[IO, Data]
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
