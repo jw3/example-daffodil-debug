@@ -22,6 +22,7 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scala.collection.JavaConverters._
 
 import logging._
+import java.nio.file
 
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
@@ -303,7 +304,7 @@ object DAPodil extends IOApp {
             IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
               .map(new ByteArrayInputStream(_))
           )
-          debugee <- Parse.resource(schema, data, Compiler())
+          debugee <- Parse.resource(schema, data, args.infosetOutputPath, Compiler())
         } yield debugee
 
       done <- DAPodil
@@ -327,7 +328,8 @@ object DAPodil extends IOApp {
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
 
-  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path) extends Arguments
+  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutputPath: Option[file.Path])
+      extends Arguments
 
   object LaunchArgs {
     def parse(request: Request): EitherNel[String, LaunchArgs] =
@@ -347,8 +349,17 @@ object DAPodil extends IOApp {
               .catchNonFatal(Paths.get(path.getAsString))
               .leftMap(t => s"'data' field from launch request is not a valid path: $t")
           )
-          .toEitherNel
+          .toEitherNel,
+        Option(request.arguments.getAsJsonPrimitive("infosetOutputPath")) match {
+          case None => Option.empty[file.Path].asRight[String].toEitherNel
+          case Some(path) =>
+            Either
+              .catchNonFatal(Option(Paths.get(path.getAsString)))
+              .leftMap(t => s"'infosetOutputPath' field from launch request is not a valid path: $t")
+              .toEitherNel
+        }
       ).parMapN(LaunchArgs.apply)
+
   }
 
   trait RequestHandler {
@@ -454,7 +465,11 @@ object DAPodil extends IOApp {
                   session.sendEvent(new Events.TerminatedEvent())
             }
 
-          outputEventsDelivery = debugee.outputs.evalMap(session.sendEvent)
+          outputEventsDelivery =
+            debugee
+              .outputs
+              .evalMap(session.sendEvent)
+              .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery finalized: $ec"))
 
           launched <- Stream
             .emit(Launched(debugee))

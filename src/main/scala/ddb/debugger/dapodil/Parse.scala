@@ -7,13 +7,15 @@ import cats.syntax.all._
 import com.microsoft.java.debug.core.protocol._
 import fs2._
 import fs2.concurrent.Signal
-import java.io.InputStream
+import fs2.io.file.Files
+import java.io._
 import java.net.URI
+import java.nio.file.Path
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.processors.parsers._
 import org.apache.daffodil.processors._
-import org.apache.daffodil.sapi.infoset.NullInfosetOutputter
+import org.apache.daffodil.sapi.infoset._
 import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
@@ -26,6 +28,7 @@ object Parse {
   def resource(
       schema: URI,
       data: InputStream,
+      infosetOutputPath: Option[Path],
       compiler: Compiler
   ): Resource[IO, DAPodil.Debugee] =
     for {
@@ -34,32 +37,57 @@ object Parse {
       parseEvents <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
       parseState <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
       outputEvents <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
-      previousState <- Resource.eval(Ref[IO].of[Option[StateForDebugger]](None))
       control <- Resource.eval(Control.initial())
       breakpoints <- Resource.eval(Ref[IO].of(DAPodil.Breakpoints.empty))
-      debugger = new Daffodil(dispatcher, parseEvents, previousState, parseState, control, outputEvents, breakpoints)
-      dp <- Resource.eval(compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true)))
-      _ <- IO
-        .interruptible(true) { // if necessary, kill this thread with extreme prejudice
-          dp.parse(
-            new InputSourceDataInputStream(data),
-            new NullInfosetOutputter()
+
+      infosetBytes = fs2.io.readOutputStream(4096) { os =>
+        for {
+          previousState <- Ref[IO].of[Option[StateForDebugger]](None)
+          debugger = new Daffodil(
+            dispatcher,
+            parseEvents,
+            previousState,
+            parseState,
+            control,
+            outputEvents,
+            breakpoints
           )
-        }
-        .onError(t => Logger[IO].debug(s"$t: going to end the queue so consumers can stop") *> IO(t.printStackTrace))
-        .guarantee {
+          dp <- compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true))
+
+          _ <- IO
+            .interruptible(true) { // if necessary, kill this thread with extreme prejudice
+              dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(os, true)) // WARNING: parse doesn't close the OutputStream
+            }
+            .guaranteeCase(outcome => IO.blocking(os.close) *> Logger[IO].debug(s"parse finished: $outcome"))
+        } yield ()
+      }
+
+      infosetWriting = infosetOutputPath match {
+        case None =>
+          infosetBytes
+            .through(text.utf8Decode)
+            .foldMonoid
+            .evalTap(_ => Logger[IO].debug("done collecting XML output"))
+            .map(infosetXML => Events.OutputEvent.createConsoleOutput(infosetXML))
+            .evalMap(event => outputEvents.offer(Some(event)))
+        case Some(path) =>
+          infosetBytes.through(Files[IO].writeAll(path))
+      }
+
+      _ <- infosetWriting
+        .onFinalizeCase { ec =>
           for {
+            _ <- Logger[IO].debug(s"infosetWriting finalized: $ec")
+            _ <- Logger[IO].debug(s"shutting down parse queues")
             _ <- parseState.tryOffer(None)
             _ <- outputEvents.tryOffer(None)
             offered <- parseEvents.tryOffer(None)
             _ <- if (offered) IO.unit else Logger[IO].warn("producer couldn't end the queue when shutting down")
           } yield ()
         }
+        .compile
+        .lastOrError
         .background
-        .onFinalizeCase {
-          case ec @ Resource.ExitCase.Errored(t) => Logger[IO].error(t)(s"parse: $ec")
-          case ec                                => Logger[IO].debug(s"parse: $ec")
-        }
 
       nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
       nextScopeId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Scope.VariablesReference.apply)))
@@ -279,7 +307,7 @@ object Parse {
 
     override def fini(processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        parseEvents.offer(Some(Event.Fini)) *> parseEvents.offer(None) *> parseState.offer(None) // terminate the queues with None
+        parseEvents.offer(Some(Event.Fini)) *> parseEvents.offer(None) // terminate the queues with None
       }
 
     override def startElement(pstate: PState, processor: Parser): Unit =
