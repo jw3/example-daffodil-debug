@@ -48,7 +48,7 @@ class DAPodil(
     state: Ref[IO, DAPodil.State],
     hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resouce management
     debugee: DAPodil.LaunchArgs => Resource[IO, DAPodil.Debugee],
-    whenDone: Deferred[IO, Unit]
+    whenDone: Deferred[IO, DAPodil.Done]
 ) extends DAPodil.RequestHandler {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
@@ -81,6 +81,7 @@ class DAPodil(
 
   /** Respond to requests and optionally update the current state. */
   def handle(request: Request): IO[Unit] =
+    // TODO: java-debug doesn't seem to support the Restart request
     request match {
       case extract(Command.INITIALIZE, _) => initialize(request)
       case extract(Command.LAUNCH, _)     =>
@@ -101,14 +102,15 @@ class DAPodil(
       case extract(Command.NEXT, _)                                      => next(request)
       case extract(Command.CONTINUE, _)                                  => continue(request)
       case extract(Command.PAUSE, _)                                     => pause(request)
-      case extract(Command.DISCONNECT, _)                                => disconnect(request)
+      case extract(Command.DISCONNECT, args: DisconnectArguments)        => disconnect(request, args)
       case _                                                             => Logger[IO].warn(show"unhandled request $request") *> session.sendResponse(request.respondFailure())
     }
 
   /** State.Uninitialized -> State.Initialized */
   def initialize(request: Request): IO[Unit] =
     state.modify {
-      case DAPodil.State.Unitialized =>
+      case DAPodil.State.Uninitialized =>
+        // TODO: VSCode doesn't seem to notice supportsRestartRequest=true and sends Disconnect (+restart) requests instead
         val response = request.respondSuccess(new Responses.InitializeResponseBody(new Types.Capabilities()))
         DAPodil.State.Initialized -> (session.sendResponse(response) *> session.sendEvent(
           new Events.InitializedEvent()
@@ -224,10 +226,12 @@ class DAPodil(
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
-  def disconnect(request: Request): IO[Unit] =
+  def disconnect(request: Request, args: DisconnectArguments): IO[Unit] =
     session
       .sendResponse(request.respondSuccess())
-      .guarantee(hotswap.clear *> whenDone.complete(()).void) // TODO: new state: disconnected
+      .guarantee {
+        hotswap.clear *> whenDone.complete(DAPodil.Done(args.restart)).void
+      }
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
@@ -271,15 +275,20 @@ object DAPodil extends IOApp {
 
   def run(args: List[String]): IO[ExitCode] =
     for {
-      state <- Ref[IO].of[State](State.Unitialized)
+      state <- Ref[IO].of[State](State.Uninitialized)
 
       address = new InetSocketAddress(4711)
       serverSocket = new ServerSocket(address.getPort, 1, address.getAddress)
       uri = URI.create(s"tcp://${address.getHostString}:${serverSocket.getLocalPort}")
 
-      _ <- Logger[IO].info(s"waiting at $uri")
+      _ <- listen(serverSocket, uri).iterateWhile((_.restart))
 
-      socket <- IO(serverSocket.accept())
+    } yield ExitCode.Success
+
+  def listen(socket: ServerSocket, uri: URI): IO[Done] =
+    for {
+      _ <- Logger[IO].info(s"waiting at $uri")
+      socket <- IO.blocking(socket.accept())
       _ <- Logger[IO].info(s"connected at $uri")
 
       debugee = (args: DAPodil.LaunchArgs) =>
@@ -292,21 +301,23 @@ object DAPodil extends IOApp {
           debugee <- Parse.resource(schema, data, Compiler())
         } yield debugee
 
-      _ <- DAPodil
+      done <- DAPodil
         .resource(socket, debugee)
-        .use(whenDone => whenDone *> Logger[IO].debug("whenDone: completed"))
+        .use(whenDone => Logger[IO].debug("whenDone: completed") *> whenDone)
       _ <- Logger[IO].info(s"disconnected at $uri")
-    } yield ExitCode.Success
+    } yield done
+
+  case class Done(restart: Boolean = false)
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def resource(socket: Socket, debugee: LaunchArgs => Resource[IO, Debugee]): Resource[IO, IO[Unit]] =
+  def resource(socket: Socket, debugee: LaunchArgs => Resource[IO, Debugee]): Resource[IO, IO[Done]] =
     for {
       dispatcher <- Dispatcher[IO]
       requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
       server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
-      state <- Resource.eval(Ref[IO].of[State](State.Unitialized))
+      state <- Resource.eval(Ref[IO].of[State](State.Uninitialized))
       hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => Logger[IO].debug(s"hotswap: $ec"))
-      whenDone <- Resource.eval(Deferred[IO, Unit])
+      whenDone <- Resource.eval(Deferred[IO, Done])
       dapodil = new DAPodil(DAPSession(server), state, hotswap, debugee, whenDone)
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
@@ -408,7 +419,7 @@ object DAPodil extends IOApp {
   sealed trait State
 
   object State {
-    case object Unitialized extends State
+    case object Uninitialized extends State
     case object Initialized extends State
     case class Launched(debugee: Debugee) extends State {
       val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stackTrace)
