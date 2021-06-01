@@ -126,14 +126,24 @@ class DAPodil(
               dbgee <- debugee(args)
               launched <- DAPodil.State.Launched.resource(session, dbgee)
             } yield launched
+          }.attempt
+
+          _ <- launched match {
+            case Left(t) =>
+              Logger[IO].warn(t)(show"couldn't launch, request $request") *>
+                session.sendResponse(
+                  request.respondFailure(Some(show"Couldn't launch Daffodil debugger: ${t.getMessage()}"))
+                )
+            case Right(launchedState) =>
+              for {
+                _ <- session.sendResponse(request.respondSuccess())
+
+                // send `Stopped` event to honor `"stopOnEntry":true`
+                _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
+
+                _ <- state.set(launchedState)
+              } yield ()
           }
-
-          _ <- session.sendResponse(request.respondSuccess())
-
-          // send `Stopped` event to honor `"stopOnEntry":true`
-          _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
-
-          _ <- state.set(launched)
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
