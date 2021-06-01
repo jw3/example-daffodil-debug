@@ -391,6 +391,8 @@ object DAPodil extends IOApp {
       val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stackTrace)
     }
 
+    implicit val show: Show[State] = Show.fromToString
+
     object Launched {
       def resource(
           session: DAPSession[Response, DebugEvent],
@@ -435,7 +437,7 @@ object DAPodil extends IOApp {
   }
 
   case class InvalidState(request: Request, expected: String, actual: State)
-      extends RuntimeException(s"expected state $expected, was $actual when receiving request $request")
+      extends RuntimeException(show"expected state $expected, was $actual when receiving request $request")
 
   object InvalidState {
     def raise(request: Request, expected: String, actual: State): IO[Nothing] =
