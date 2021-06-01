@@ -351,7 +351,9 @@ object DAPodil extends IOApp {
         for {
           _ <- Logger[IO].debug(show"R> $request")
           handler <- requestHandler.get
-          _ <- handler.handle(request)
+          _ <- handler.handle(request).recoverWith {
+            case t => Logger[IO].error(t)(show"error during handling of request $request")
+          }
         } yield ()
       }
   }
