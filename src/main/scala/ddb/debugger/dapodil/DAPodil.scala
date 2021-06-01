@@ -14,6 +14,7 @@ import fs2._
 import fs2.concurrent.Signal
 import java.io._
 import java.net._
+import java.nio.file
 import java.nio.file.Paths
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -283,9 +284,9 @@ object DAPodil extends IOApp {
 
       debugee = (args: DAPodil.LaunchArgs) =>
         for {
-          schema <- Resource.eval(IO.blocking(Paths.get(args.schemaPath).toUri))
+          schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
           data <- Resource.eval(
-            IO.blocking(new FileInputStream(Paths.get(args.dataPath).toFile).readAllBytes())
+            IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
               .map(new ByteArrayInputStream(_))
           )
           debugee <- Parse.resource(schema, data, Compiler())
@@ -310,17 +311,27 @@ object DAPodil extends IOApp {
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
 
-  case class LaunchArgs(schemaPath: String, dataPath: String) extends Arguments
+  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path) extends Arguments
 
   object LaunchArgs {
     def parse(request: Request): EitherNel[String, LaunchArgs] =
       (
         Option(request.arguments.getAsJsonPrimitive("program"))
-          .map(_.getAsString)
-          .toRightNel("missing 'program' field from launch request"),
+          .toRight("missing 'program' field from launch request")
+          .flatMap(path =>
+            Either
+              .catchNonFatal(Paths.get(path.getAsString))
+              .leftMap(t => s"'program' field from launch request is not a valid path: $t")
+          )
+          .toEitherNel,
         Option(request.arguments.getAsJsonPrimitive("data"))
-          .map(_.getAsString)
-          .toRightNel("missing 'data' field from launch request")
+          .toRight("missing 'data' field from launch request")
+          .flatMap(path =>
+            Either
+              .catchNonFatal(Paths.get(path.getAsString))
+              .leftMap(t => s"'data' field from launch request is not a valid path: $t")
+          )
+          .toEitherNel
       ).parMapN(LaunchArgs.apply)
   }
 
