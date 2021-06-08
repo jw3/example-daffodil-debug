@@ -61,10 +61,12 @@ object Parse {
           case ec                                => Logger[IO].debug(s"parse: $ec")
         }
 
-      nextFrameId <- Resource.eval(DAPodil.Frame.Id.next)
+      nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
+      nextScopeId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Scope.VariablesReference.apply)))
+
       debugeeData <- Stream
         .fromQueueNoneTerminated(parseEvents)
-        .through(fromParse(nextFrameId))
+        .through(fromParse(nextFrameId, nextScopeId))
         .holdResource(DAPodil.Data.empty)
     } yield new DAPodil.Debugee {
       def data(): Signal[IO, DAPodil.Data] =
@@ -95,13 +97,20 @@ object Parse {
 
   /** Translate parse events to updated Daffodil state. */
   def fromParse(
-      frameIds: DAPodil.Frame.Id.Next
+      frameIds: Next[DAPodil.Frame.Id],
+      scopeIds: Next[DAPodil.Frame.Scope.VariablesReference]
   ): Stream[IO, Parse.Event] => Stream[IO, DAPodil.Data] =
     events =>
       events.evalScan(DAPodil.Data.empty) {
         case (_, Parse.Event.Init(_)) => IO.pure(DAPodil.Data.empty)
         case (prev, startElement: Parse.Event.StartElement) =>
-          frameIds.next.map(nextFrameId => prev.push(createFrame(startElement, nextFrameId)))
+          (frameIds.next, scopeIds.next, scopeIds.next).mapN(
+            (
+                nextFrameId,
+                schemaScopeId,
+                dataScopeId
+            ) => prev.push(createFrame(startElement, nextFrameId, schemaScopeId, dataScopeId))
+          )
         case (prev, Parse.Event.EndElement(_)) => IO.pure(prev.pop)
         case (prev, _: Parse.Event.Fini.type)  => IO.pure(prev)
       }
@@ -116,7 +125,12 @@ object Parse {
     *
     * @see https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame
     */
-  def createFrame(startElement: Parse.Event.StartElement, id: DAPodil.Frame.Id): DAPodil.Frame = {
+  def createFrame(
+      startElement: Parse.Event.StartElement,
+      id: DAPodil.Frame.Id,
+      schemaScopeId: DAPodil.Frame.Scope.VariablesReference,
+      dataScopeId: DAPodil.Frame.Scope.VariablesReference
+  ): DAPodil.Frame = {
     val stackFrame = new Types.StackFrame(
       /* It must be unique across all threads.
        * This id can be used to retrieve the scopes of the frame with the
@@ -134,6 +148,7 @@ object Parse {
         .map(_.toInt)
         .getOrElse(1) // column numbers start at 1 according to InitializeRequest
     )
+
     val bytePos1b = startElement.state.currentLocation.bytePos1b
     val hidden = startElement.state.withinHiddenNest
     val childIndex = if (startElement.state.childPos != -1) Some(startElement.state.childPos) else None
@@ -148,10 +163,8 @@ object Parse {
       f <- dpr.field.toScalaOption
     } yield Misc.remapStringToVisibleGlyphs(f)
 
-    DAPodil.Frame(
-      stackFrame,
+    val schemaVariables: List[Types.Variable] =
       (List(
-        new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null),
         new Types.Variable("hidden", hidden.toString, "bool", 0, null)
       ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
         ++ groupIndex
@@ -163,6 +176,24 @@ object Parse {
         ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
         ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
         .sortBy(_.name)
+
+    val dataVariables: List[Types.Variable] =
+      List(new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null))
+
+    DAPodil.Frame(
+      stackFrame,
+      List(
+        DAPodil.Frame.Scope(
+          "Schema",
+          schemaScopeId,
+          schemaVariables
+        ),
+        DAPodil.Frame.Scope(
+          "Data",
+          dataScopeId,
+          dataVariables
+        )
+      )
     )
   }
 

@@ -153,9 +153,9 @@ class DAPodil(
 
   def setBreakpoints(request: Request, args: SetBreakpointArguments): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          _ <- launched.debugee.setBreakpoints(
+          _ <- debugee.setBreakpoints(
             DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp => DAPodil.Line(bp.line))
           )
           breakpoints = args.breakpoints.toList.zipWithIndex.map {
@@ -169,25 +169,28 @@ class DAPodil(
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
-  def threads(request: Request): IO[Unit] = {
-    val response = request.respondSuccess {
-      // There's always a single "thread".
-      val threads = List(new Types.Thread(1L, "daffodil"))
-
-      new Responses.ThreadsResponseBody(threads.asJava)
+  def threads(request: Request): IO[Unit] =
+    state.get.flatMap {
+      case DAPodil.State.Launched(debugee) =>
+        for {
+          threads <- debugee.threads
+          _ <- session.sendResponse(
+            request.respondSuccess(
+              new Responses.ThreadsResponseBody(threads.asJava)
+            )
+          )
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
-
-    session.sendResponse(response)
-  }
 
   def stackTrace(request: Request): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          stackTrace <- launched.stackTrace
+          stackTrace <- debugee.stackTrace()
           response = request.respondSuccess(
             new Responses.StackTraceResponseBody(
-              stackTrace.frames.asJava,
+              stackTrace.frames.map(_.stackFrame).asJava,
               stackTrace.frames.size
             )
           )
@@ -198,9 +201,9 @@ class DAPodil(
 
   def next(request: Request): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          _ <- launched.debugee.step
+          _ <- debugee.step
           _ <- session.sendResponse(request.respondSuccess())
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -208,9 +211,9 @@ class DAPodil(
 
   def continue(request: Request): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          _ <- launched.debugee.continue()
+          _ <- debugee.continue()
           _ <- session.sendResponse(request.respondSuccess())
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -218,9 +221,9 @@ class DAPodil(
 
   def pause(request: Request): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          _ <- launched.debugee.pause()
+          _ <- debugee.pause()
           _ <- session.sendResponse(request.respondSuccess())
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
@@ -235,35 +238,37 @@ class DAPodil(
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
-      case _: DAPodil.State.Launched =>
-        session.sendResponse(
-          request.respondSuccess(
-            // there's only one scope per stack frame
-            new Responses.ScopesResponseBody(List(new Types.Scope("Daffodil", args.frameId, false)).asJava)
-          )
-        )
+      case DAPodil.State.Launched(debugee) =>
+        for {
+          data <- debugee.data().get
+          _ <- data.stack.frames
+            .find(_.stackFrame.id == args.frameId)
+            .fold(
+              session.sendResponse(request.respondFailure(Some(s"couldn't find scopes for frame ${args.frameId}")))
+            ) { frame =>
+              session.sendResponse(
+                request.respondSuccess(new Responses.ScopesResponseBody(frame.scopes.map(_.toDAP()).asJava))
+              )
+            }
+        } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
   def variables(request: Request, args: VariablesArguments): IO[Unit] =
     state.get.flatMap {
-      case launched: DAPodil.State.Launched =>
+      case DAPodil.State.Launched(debugee) =>
         // return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
-          state <- launched.debugee.data.get
-          response = state.stack
-            .find(_.stackFrame.id == args.variablesReference)
-            .map {
-              case DAPodil.Frame(_, variables) =>
-                request.respondSuccess(
-                  new Responses.VariablesResponseBody(variables.asJava)
-                )
-            }
-          _ <- response.fold(
-            Logger[IO]
-              .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${state.stack}") *> // TODO: handle better
-              session.sendResponse(request.respondFailure())
-          )(session.sendResponse)
+          data <- debugee.data.get
+          _ <- data.stack
+            .find(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
+            .fold(
+              Logger[IO]
+                .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${data}") *> // TODO: handle better
+                session.sendResponse(request.respondFailure())
+            )(variables =>
+              session.sendResponse(request.respondSuccess(new Responses.VariablesResponseBody(variables.asJava)))
+            )
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -387,6 +392,10 @@ object DAPodil extends IOApp {
   trait Debugee {
     // TODO: extract "control" interface from "state" interface
     def data(): Signal[IO, Data]
+    def threads(): IO[List[Types.Thread]] =
+      data.get.map(_.threads)
+    def stackTrace(): IO[StackTrace] =
+      data.get.map(_.stack)
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
 
@@ -421,9 +430,7 @@ object DAPodil extends IOApp {
   object State {
     case object Uninitialized extends State
     case object Initialized extends State
-    case class Launched(debugee: Debugee) extends State {
-      val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stackTrace)
-    }
+    case class Launched(debugee: Debugee) extends State
 
     implicit val show: Show[State] = Show.fromToString
 
@@ -478,62 +485,67 @@ object DAPodil extends IOApp {
       IO.raiseError(InvalidState(request, expected, actual))
   }
 
-  // TODO: map multiple threads to stack
-  case class Data(stack: List[Frame]) {
+  case class Data(stack: StackTrace) {
     // there's always a single "thread"
-    val thread = new Types.Thread(1L, "daffodil")
-
-    def stackTrace: StackTrace = StackTrace(stack.map(_.stackFrame))
+    val threads = List(new Types.Thread(1L, "daffodil"))
 
     def push(frame: Frame): Data =
-      copy(stack = frame :: stack)
+      copy(stack = stack.push(frame))
 
     def pop(): Data =
-      copy(stack = if (stack.isEmpty) stack else stack.tail) // TODO: warn of bad pop
+      copy(stack = stack.pop) // TODO: warn of bad pop
   }
 
   object Data {
     implicit val show: Show[Data] =
       ds => show"DaffodilState(${ds.stack})"
 
-    val empty = Data(List.empty)
+    val empty: Data = Data(StackTrace.empty)
   }
 
-  case class Frame(stackFrame: Types.StackFrame, variables: List[Types.Variable])
+  case class Frame(stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
+    def find(reference: Frame.Scope.VariablesReference): Option[Frame.Scope] =
+      scopes.find(_.reference == reference)
+  }
 
   object Frame {
+
+    implicit val show: Show[Frame] = Show.fromToString
 
     /** Identifier for a stack frame within a stack trace. */
     case class Id(value: Int) extends AnyVal
 
-    object Id {
-
-      /** A source of new frame identifiers. */
-      trait Next {
-        def next: IO[Id]
-      }
-
-      def next: IO[Next] =
-        for {
-          ids <- Ref[IO].of(0)
-        } yield new Next {
-          def next: IO[Id] = ids.getAndUpdate(_ + 1).map(Id.apply)
-        }
+    case class Scope(
+        name: String,
+        reference: Scope.VariablesReference,
+        variables: List[Types.Variable]
+    ) {
+      def toDAP(): Types.Scope =
+        new Types.Scope(name, reference.value, false)
     }
 
-    implicit val show: Show[Frame] = Show.fromToString
+    object Scope {
+      case class VariablesReference(value: Int) extends AnyVal
+    }
+
   }
 
-  case class StackTrace(frames: List[Types.StackFrame]) {
-    def push(frame: Types.StackFrame): StackTrace = copy(frame :: frames)
-    def pop(): StackTrace = copy(frames.tail)
+  case class StackTrace(frames: List[Frame]) {
+    def push(frame: Frame): StackTrace =
+      copy(frame :: frames)
+
+    def pop(): StackTrace =
+      copy(frames.tail)
+
+    def find(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
+      frames.collectFirstSome(_.find(reference)).map(_.variables)
   }
 
   object StackTrace {
     val empty: StackTrace = StackTrace(List.empty)
 
     implicit val show: Show[StackTrace] =
-      st => st.frames.map(f => s"${f.line}:${f.column}").mkString("; ")
+      st => st.frames.map(f => s"${f.stackFrame.line}:${f.stackFrame.column}").mkString("; ")
   }
 
   case class Path(value: String) extends AnyVal
