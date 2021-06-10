@@ -385,7 +385,7 @@ object DAPodil extends IOApp {
     ): Resource[IO, AbstractProtocolServer] =
       Resource
         .make(IO(new Server(in, out, dispatcher, requestHandler)))(server => IO(server.stop()))
-        .flatTap(server => IO(server.run).background)
+        .flatTap(server => IO.blocking(server.run).background)
   }
 
   /** DAPodil launches the debugee which reports its state and handles debug commands. */
