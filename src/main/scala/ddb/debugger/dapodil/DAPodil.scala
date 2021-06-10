@@ -127,7 +127,7 @@ class DAPodil(
         for {
           launched <- hotswap.swap {
             DAPodil.State.Launched.resource(session, debugee(args))
-          }
+          }.attempt
 
           _ <- launched match {
             case Left(t) =>
@@ -151,7 +151,7 @@ class DAPodil(
 
   def setBreakpoints(request: Request, args: SetBreakpointArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(debugee, _) =>
         for {
           _ <- debugee.setBreakpoints(
             DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp => DAPodil.Line(bp.line))
@@ -169,9 +169,9 @@ class DAPodil(
 
   def threads(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case launched: DAPodil.State.Launched =>
         for {
-          threads <- debugee.threads
+          threads <- launched.threads
           _ <- session.sendResponse(
             request.respondSuccess(
               new Responses.ThreadsResponseBody(threads.asJava)
@@ -183,9 +183,9 @@ class DAPodil(
 
   def stackTrace(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case launched: DAPodil.State.Launched =>
         for {
-          stackTrace <- debugee.stackTrace()
+          stackTrace <- launched.stackTrace
           response = request.respondSuccess(
             new Responses.StackTraceResponseBody(
               stackTrace.frames.map(_.stackFrame).asJava,
@@ -199,7 +199,7 @@ class DAPodil(
 
   def next(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(debugee, _) =>
         for {
           _ <- debugee.step
           _ <- session.sendResponse(request.respondSuccess())
@@ -209,7 +209,7 @@ class DAPodil(
 
   def continue(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(debugee, _) =>
         for {
           _ <- debugee.continue()
           _ <- session.sendResponse(request.respondSuccess())
@@ -219,7 +219,7 @@ class DAPodil(
 
   def pause(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(debugee, _) =>
         for {
           _ <- debugee.pause()
           _ <- session.sendResponse(request.respondSuccess())
@@ -236,9 +236,9 @@ class DAPodil(
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(_, data) =>
         for {
-          data <- debugee.data().get
+          data <- data.get
           _ <- data.stack.frames
             .find(_.stackFrame.id == args.frameId)
             .fold(
@@ -254,10 +254,10 @@ class DAPodil(
 
   def variables(request: Request, args: VariablesArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee) =>
+      case DAPodil.State.Launched(_, data) =>
         // return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
-          data <- debugee.data.get
+          data <- data.get
           _ <- data.stack
             .find(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
             .fold(
@@ -435,7 +435,8 @@ object DAPodil extends IOApp {
     case object Uninitialized extends State
     case object Initialized extends State
     case class Launched(debugee: Debugee, data: Signal[IO, Data]) extends State {
-      val stackTrace: IO[StackTrace] = data.get.map(_.stackTrace)
+      val stackTrace: IO[StackTrace] = data.get.map(_.stack)
+      val threads: IO[List[Types.Thread]] = data.get.map(_.threads)
     }
 
     object Launched {
@@ -478,6 +479,8 @@ object DAPodil extends IOApp {
             .onFinalizeCase(ec => Logger[IO].debug(s"launched: $ec"))
         } yield launched
     }
+
+    implicit val show: Show[State] = Show.fromToString
 
     def deliverStoppedEvents(session: DAPSession[Response, DebugEvent]): Debugee.State.Stopped => IO[Unit] = {
       case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
