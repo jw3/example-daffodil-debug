@@ -126,11 +126,8 @@ class DAPodil(
       case DAPodil.State.Initialized =>
         for {
           launched <- hotswap.swap {
-            for {
-              dbgee <- debugee(args)
-              launched <- DAPodil.State.Launched.resource(session, dbgee)
-            } yield launched
-          }.attempt
+            DAPodil.State.Launched.resource(session, debugee(args))
+          }
 
           _ <- launched match {
             case Left(t) =>
@@ -304,7 +301,7 @@ object DAPodil extends IOApp {
             IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
               .map(new ByteArrayInputStream(_))
           )
-          debugee <- Parse.resource(schema, data, args.infosetOutputPath, Compiler())
+          debugee <- Parse.debugee(schema, data, args.infosetOutputPath)
         } yield debugee
 
       done <- DAPodil
@@ -402,11 +399,7 @@ object DAPodil extends IOApp {
   /** DAPodil launches the debugee which reports its state and handles debug commands. */
   trait Debugee {
     // TODO: extract "control" interface from "state" interface
-    def data(): Signal[IO, Data]
-    def threads(): IO[List[Types.Thread]] =
-      data.get.map(_.threads)
-    def stackTrace(): IO[StackTrace] =
-      data.get.map(_.stack)
+    def data(): Stream[IO, Data]
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
 
@@ -441,17 +434,18 @@ object DAPodil extends IOApp {
   object State {
     case object Uninitialized extends State
     case object Initialized extends State
-    case class Launched(debugee: Debugee) extends State
-
-    implicit val show: Show[State] = Show.fromToString
+    case class Launched(debugee: Debugee, data: Signal[IO, Data]) extends State {
+      val stackTrace: IO[StackTrace] = data.get.map(_.stackTrace)
+    }
 
     object Launched {
       def resource(
           session: DAPSession[Response, DebugEvent],
-          debugee: Debugee
+          debugee: Resource[IO, Debugee]
       ): Resource[IO, Launched] =
         for {
           _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
+          debugee <- debugee.onFinalizeCase(ec => Logger[IO].debug(s"debugee: $ec"))
 
           stoppedEventsDelivery = debugee.state
             .collect { case s: Debugee.State.Stopped => s }
@@ -465,14 +459,17 @@ object DAPodil extends IOApp {
                   session.sendEvent(new Events.TerminatedEvent())
             }
 
-          outputEventsDelivery =
-            debugee
-              .outputs
-              .evalMap(session.sendEvent)
-              .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery finalized: $ec"))
+          outputEventsDelivery = debugee.outputs
+            .evalMap(session.sendEvent)
+            .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery: $ec"))
+
+          data <- debugee
+            .data()
+            .holdResource(Data.empty)
+            .onFinalizeCase(ec => Logger[IO].debug(s"debugee.data resource: $ec"))
 
           launched <- Stream
-            .emit(Launched(debugee))
+            .emit(Launched(debugee, data))
             .concurrently(stoppedEventsDelivery.merge(outputEventsDelivery))
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile

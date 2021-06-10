@@ -6,7 +6,6 @@ import cats.effect.std._
 import cats.syntax.all._
 import com.microsoft.java.debug.core.protocol._
 import fs2._
-import fs2.concurrent.Signal
 import fs2.io.file.Files
 import java.io._
 import java.net.URI
@@ -21,107 +20,142 @@ import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
+trait Parse {
+
+  /** Run the parse, returning the bytes of the final infoset. */
+  def run(): Stream[IO, Byte]
+
+  def close(): IO[Unit]
+}
+
 /** A running Daffodil parse. */
 object Parse {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
-  def resource(
+  def apply(
       schema: URI,
       data: InputStream,
-      infosetOutputPath: Option[Path],
-      compiler: Compiler
+      debugger: Debugger
+  ): IO[Parse] =
+    for {
+      dp <- Compiler().compile(schema).map(p => p.withDebugger(debugger).withDebugging(true))
+      done <- Ref[IO].of(false)
+      pleaseStop <- Deferred[IO, Unit]
+    } yield new Parse {
+      def run(): Stream[IO, Byte] =
+        fs2.io
+          .readOutputStream(4096) { os =>
+            val stopper =
+              pleaseStop.get *> IO.canceled
+
+            val parse =
+              IO.interruptible(true) {
+                  dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(os, true)) // WARNING: parse doesn't close the OutputStream, so closed below
+                }
+                .guaranteeCase(outcome => Logger[IO].debug(s"parse finished: $outcome"))
+                .void
+
+            Resource.fromAutoCloseable(IO.pure(os)).use { _ =>
+              stopper &> parse.guarantee(done.set(true))
+            }
+          }
+
+      def close(): IO[Unit] =
+        done.get.flatMap {
+          case false => Logger[IO].debug("interrupting parse") *> pleaseStop.complete(()).void
+          case true  => Logger[IO].debug("parse done, no interruption") *> IO.unit
+        }
+    }
+
+  class Debugee(
+      outputData: Stream[IO, DAPodil.Data],
+      outputState: Stream[IO, DAPodil.Debugee.State],
+      stateSink: QueueSink[IO, Option[DAPodil.Debugee.State]],
+      outputEvents: Stream[IO, Events.OutputEvent],
+      breakpoints: Breakpoints,
+      control: Control
+  ) extends DAPodil.Debugee {
+    def data(): Stream[IO, DAPodil.Data] =
+      outputData
+
+    def state(): Stream[IO, DAPodil.Debugee.State] =
+      outputState
+
+    def outputs(): Stream[IO, Events.OutputEvent] =
+      outputEvents
+
+    def step(): IO[Unit] =
+      control.step() *> stateSink.offer(
+        Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Step))
+      )
+
+    def continue(): IO[Unit] =
+      control.continue() *> stateSink.offer(Some(DAPodil.Debugee.State.Running))
+
+    def pause(): IO[Unit] =
+      control.pause() *> stateSink.offer(
+        Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Pause))
+      )
+
+    def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
+      breakpoints.setBreakpoints(args)
+  }
+
+  def debugee(
+      schema: URI,
+      in: InputStream,
+      infosetOutputPath: Option[Path]
   ): Resource[IO, DAPodil.Debugee] =
     for {
-      dispatcher <- Dispatcher[IO]
-      // TODO: explore fs2.Channel as alternative to Queue
-      parseEvents <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
-      parseState <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
-      outputEvents <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
+      data <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Data]](10))
+      state <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
+      outputs <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
+      breakpoints <- Resource.eval(Breakpoints())
       control <- Resource.eval(Control.initial())
-      breakpoints <- Resource.eval(Ref[IO].of(DAPodil.Breakpoints.empty))
 
-      infosetBytes = fs2.io.readOutputStream(4096) { os =>
-        for {
-          previousState <- Ref[IO].of[Option[StateForDebugger]](None)
-          debugger = new Daffodil(
-            dispatcher,
-            parseEvents,
-            previousState,
-            parseState,
-            control,
-            outputEvents,
-            breakpoints
-          )
-          dp <- compiler.compile(schema).map(p => p.withDebugger(debugger).withDebugging(true))
+      debugee = new Debugee(
+        Stream.fromQueueNoneTerminated(data),
+        Stream.fromQueueNoneTerminated(state),
+        state,
+        Stream.fromQueueNoneTerminated(outputs),
+        breakpoints,
+        control
+      )
 
-          _ <- IO
-            .interruptible(true) { // if necessary, kill this thread with extreme prejudice
-              dp.parse(new InputSourceDataInputStream(data), new XMLTextInfosetOutputter(os, true)) // WARNING: parse doesn't close the OutputStream
-            }
-            .guaranteeCase(outcome => IO.blocking(os.close) *> Logger[IO].debug(s"parse finished: $outcome"))
-        } yield ()
-      }
+      events <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
+      debugger <- DaffodilDebugger.resource(state, outputs, events, breakpoints, control)
+      parse <- Resource.eval(Parse(schema, in, debugger))
 
       infosetWriting = infosetOutputPath match {
         case None =>
-          infosetBytes
+          parse
+            .run()
             .through(text.utf8Decode)
             .foldMonoid
-            .evalTap(_ => Logger[IO].debug("done collecting XML output"))
+            .evalTap(_ => Logger[IO].debug("done collecting infoset XML output"))
             .map(infosetXML => Events.OutputEvent.createConsoleOutput(infosetXML))
-            .evalMap(event => outputEvents.offer(Some(event)))
+            .enqueueNoneTerminated(outputs)
         case Some(path) =>
-          infosetBytes.through(Files[IO].writeAll(path))
+          parse.run().through(Files[IO].writeAll(path))
       }
-
-      _ <- infosetWriting
-        .onFinalizeCase { ec =>
-          for {
-            _ <- Logger[IO].debug(s"infosetWriting finalized: $ec")
-            _ <- Logger[IO].debug(s"shutting down parse queues")
-            _ <- parseState.tryOffer(None)
-            _ <- outputEvents.tryOffer(None)
-            offered <- parseEvents.tryOffer(None)
-            _ <- if (offered) IO.unit else Logger[IO].warn("producer couldn't end the queue when shutting down")
-          } yield ()
-        }
-        .compile
-        .lastOrError
-        .background
 
       nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
       nextScopeId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Scope.VariablesReference.apply)))
 
-      debugeeData <- Stream
-        .fromQueueNoneTerminated(parseEvents)
+      deliverParseData = Stream
+        .fromQueueNoneTerminated(events)
         .through(fromParse(nextFrameId, nextScopeId))
-        .holdResource(DAPodil.Data.empty)
-    } yield new DAPodil.Debugee {
-      def data(): Signal[IO, DAPodil.Data] =
-        debugeeData
+        .enqueueNoneTerminated(data)
 
-      def state(): Stream[IO, DAPodil.Debugee.State] =
-        Stream.fromQueueNoneTerminated(parseState)
+      _ <- Stream
+        .emit(debugee)
+        .concurrently(Stream(infosetWriting, deliverParseData).parJoinUnbounded)
+        .compile
+        .resource
+        .lastOrError
 
-      def outputs(): Stream[IO, Events.OutputEvent] =
-        Stream.fromQueueNoneTerminated(outputEvents)
-
-      def step(): IO[Unit] =
-        control.step() *> parseState.offer(
-          Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Step))
-        )
-
-      def continue(): IO[Unit] =
-        control.continue() *> parseState.offer(Some(DAPodil.Debugee.State.Running))
-
-      def pause(): IO[Unit] =
-        control.pause() *> parseState.offer(
-          Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Pause))
-        )
-
-      def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
-        breakpoints.update(bp => bp.copy(value = bp.value + args))
-    }
+      _ <- Resource.onFinalize(Logger[IO].debug("signalling a stop") *> parse.close())
+    } yield debugee
 
   /** Translate parse events to updated Daffodil state. */
   def fromParse(
@@ -238,6 +272,26 @@ object Parse {
     implicit val show: Show[Event] = Show.fromToString
   }
 
+  trait Breakpoints {
+    def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit]
+    def shouldBreak(location: DAPodil.Location): IO[Boolean]
+  }
+
+  object Breakpoints {
+    def apply(): IO[Breakpoints] =
+      for {
+        breakpoints <- Ref[IO].of(DAPodil.Breakpoints.empty)
+      } yield new Breakpoints {
+        def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
+          breakpoints.update(bp => bp.copy(value = bp.value + args))
+
+        def shouldBreak(location: DAPodil.Location): IO[Boolean] =
+          for {
+            bp <- breakpoints.get
+          } yield bp.contains(location)
+      }
+  }
+
   sealed trait Control {
     def await(): IO[Boolean]
 
@@ -289,38 +343,37 @@ object Parse {
       }
   }
 
-  class Daffodil(
+  class DaffodilDebugger(
       dispatcher: Dispatcher[IO],
-      parseEvents: Queue[IO, Option[Event]],
       previousState: Ref[IO, Option[StateForDebugger]],
-      parseState: Queue[IO, Option[DAPodil.Debugee.State]],
+      state: QueueSink[IO, Option[DAPodil.Debugee.State]],
+      sendOutput: QueueSink[IO, Option[Events.OutputEvent]],
+      breakpoints: Breakpoints,
       control: Control,
-      outputEvents: Queue[IO, Option[Events.OutputEvent]],
-      breakpoints: Ref[IO, DAPodil.Breakpoints]
+      events: QueueSink[IO, Option[Event]]
   ) extends Debugger {
 
     override def init(pstate: PState, processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        parseEvents.offer(Some(Event.Init(pstate.copyStateForDebugger))) *>
+        events.offer(Some(Event.Init(pstate.copyStateForDebugger))) *>
           previousState.set(Some(pstate.copyStateForDebugger))
       }
 
     override def fini(processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        parseEvents.offer(Some(Event.Fini)) *> parseEvents.offer(None) // terminate the queues with None
+        events.offer(Some(Event.Fini)) *> events.offer(None) *> // no more events after this
+          state.offer(None) // no more states == the parse is terminated
       }
 
     override def startElement(pstate: PState, processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        val push = Some(
-          Event.StartElement(
-            pstate.copyStateForDebugger,
-            pstate.currentNode.toScalaOption.map(_.name),
-            pstate.schemaFileLocation
-          )
+        val push = Event.StartElement(
+          pstate.copyStateForDebugger,
+          pstate.currentNode.toScalaOption.map(_.name),
+          pstate.schemaFileLocation
         )
         logger.debug("pre-offer") *>
-          parseEvents.offer(push) *>
+          events.offer(Some(push)) *>
           logger.debug("pre-checkBreakpoints") *>
           checkBreakpoints(createLocation(pstate.schemaFileLocation)) *>
           logger.debug("pre-control await") *>
@@ -339,24 +392,44 @@ object Parse {
           val dataLoc = prestate.currentLocation.asInstanceOf[DataLoc]
           val lines = dataLoc.dump(None, prestate.currentLocation, state)
 
-          outputEvents.offer(Some(Events.OutputEvent.createConsoleOutput(lines + "\n")))
+          sendOutput.offer(Some(Events.OutputEvent.createConsoleOutput(lines + "\n")))
         }
       } yield ()
 
     def checkBreakpoints(location: DAPodil.Location): IO[Unit] =
-      for {
-        bp <- breakpoints.get
-        _ <- Logger[IO].debug(show"check break at location $location, breakpoints $bp")
-        _ <- if (bp.contains(location))
-          control.pause() *> parseState.offer(
-            Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.BreakpointHit(location)))
-          )
-        else IO.unit
-      } yield ()
+      breakpoints
+        .shouldBreak(location)
+        .ifM(
+          control
+            .pause() *> state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Pause))),
+          IO.unit
+        )
 
     override def endElement(pstate: PState, processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        parseEvents.offer(Some(Event.EndElement(pstate.copyStateForDebugger)))
+        events.offer(Some(Event.EndElement(pstate.copyStateForDebugger)))
       }
+  }
+
+  object DaffodilDebugger {
+    def resource(
+        state: QueueSink[IO, Option[DAPodil.Debugee.State]],
+        outputs: QueueSink[IO, Option[Events.OutputEvent]],
+        events: QueueSink[IO, Option[Event]],
+        breakpoints: Breakpoints,
+        control: Control
+    ): Resource[IO, DaffodilDebugger] =
+      for {
+        dispatcher <- Dispatcher[IO]
+        previousState <- Resource.eval(Ref[IO].of[Option[StateForDebugger]](None))
+      } yield new DaffodilDebugger(
+        dispatcher,
+        previousState,
+        state,
+        outputs,
+        breakpoints,
+        control,
+        events
+      )
   }
 }
