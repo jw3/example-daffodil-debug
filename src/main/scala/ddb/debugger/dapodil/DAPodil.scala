@@ -262,7 +262,7 @@ class DAPodil(
         for {
           data <- debugee.data.get
           _ <- data.stack
-            .findVariables(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
+            .variables(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
             .fold(
               Logger[IO]
                 .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${data}") *> // TODO: handle better
@@ -520,8 +520,8 @@ object DAPodil extends IOApp {
   }
 
   case class Frame(id: Frame.Id, stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
-    def find(reference: Frame.Scope.VariablesReference): Option[Frame.Scope] =
-      scopes.find(_.reference == reference)
+    def variables(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
+      scopes.collectFirstSome(_.variables.get(reference))
   }
 
   object Frame {
@@ -534,7 +534,7 @@ object DAPodil extends IOApp {
     case class Scope(
         name: String,
         reference: Scope.VariablesReference,
-        variables: List[Types.Variable]
+        variables: Map[Scope.VariablesReference, List[Types.Variable]]
     ) {
       def toDAP(): Types.Scope =
         new Types.Scope(name, reference.value, false)
@@ -556,8 +556,8 @@ object DAPodil extends IOApp {
     def findFrame(frameId: Frame.Id): Option[Frame] =
       frames.find(_.id == frameId)
 
-    def findVariables(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
-      frames.collectFirstSome(_.find(reference)).map(_.variables)
+    def variables(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
+      frames.collectFirstSome(_.variables(reference))
   }
 
   object StackTrace {

@@ -118,7 +118,7 @@ object Parse {
               for {
                 frame <- data.stack.findFrame(DAPodil.Frame.Id(args.frameId))
                 variable <- frame.scopes.collectFirstSome { scope =>
-                  scope.variables.find(_.name == name)
+                  scope.variables.values.toList.collectFirstSome(_.find(_.name == name))
                 }
               } yield variable
             }
@@ -191,30 +191,41 @@ object Parse {
           f <- dpr.field.toScalaOption
         } yield Misc.remapStringToVisibleGlyphs(f)
 
-        val schemaVariables: List[Types.Variable] =
-          startElement.state.variableMap.qnames
-            .sortBy(_.toPrettyString)
+        val schemaVariables: IO[Map[DAPodil.Frame.Scope.VariablesReference, List[Types.Variable]]] =
+          startElement.state.variableMap.qnames.toList
+            .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level
             .toList
-            .fproduct(startElement.state.variableMap.find)
-            .map {
-              case (name, value) =>
-                new Types.Variable(
-                  name.toPrettyString,
-                  value.map(_.value.value.toString).getOrElse("???"),
-                  value
-                    .map(_.state match {
-                      case VariableDefined      => "default"
-                      case VariableRead         => "read"
-                      case VariableSet          => "set"
-                      case VariableUndefined    => "undefined"
-                      case VariableBeingDefined => "being defined"
-                      case VariableInProcess    => "in process"
-                    })
-                    .getOrElse("???"),
-                  0,
-                  null
-                )
+            .flatTraverse {
+              case (ns, vs) =>
+                scopeIds.next.map { ref =>
+                  List(schemaScopeId -> List(new Types.Variable(ns.toString(), "", null, ref.value, null))) ++
+                    List(
+                      ref -> vs
+                        .sortBy(_.toPrettyString)
+                        .fproduct(startElement.state.variableMap.find)
+                        .map {
+                          case (name, value) =>
+                            new Types.Variable(
+                              name.toQNameString,
+                              value.map(_.value.value.toString).getOrElse("???"),
+                              value
+                                .map(_.state match {
+                                  case VariableDefined      => "default"
+                                  case VariableRead         => "read"
+                                  case VariableSet          => "set"
+                                  case VariableUndefined    => "undefined"
+                                  case VariableBeingDefined => "being defined"
+                                  case VariableInProcess    => "in process"
+                                })
+                                .getOrElse("???"),
+                              0,
+                              null
+                            )
+                        }
+                    )
+                }
             }
+            .map(_.toMap)
 
         val parseVariables: List[Types.Variable] =
           (List(
@@ -233,28 +244,30 @@ object Parse {
         val dataVariables: List[Types.Variable] =
           List(new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null))
 
-        DAPodil.Frame(
-          frameId,
-          stackFrame,
-          List(
-            DAPodil.Frame.Scope(
-              "Parse",
-              parseScopeId,
-              parseVariables
-            ),
-            DAPodil.Frame.Scope(
-              "Schema",
-              schemaScopeId,
-              schemaVariables
-            ),
-            DAPodil.Frame.Scope(
-              "Data",
-              dataScopeId,
-              dataVariables
+        schemaVariables.map(sv =>
+          DAPodil.Frame(
+            frameId,
+            stackFrame,
+            List(
+              DAPodil.Frame.Scope(
+                "Parse",
+                parseScopeId,
+                Map(parseScopeId -> parseVariables)
+              ),
+              DAPodil.Frame.Scope(
+                "Schema",
+                schemaScopeId,
+                sv
+              ),
+              DAPodil.Frame.Scope(
+                "Data",
+                dataScopeId,
+                Map(dataScopeId -> dataVariables)
+              )
             )
           )
         )
-    }
+    }.flatten
 
   /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
