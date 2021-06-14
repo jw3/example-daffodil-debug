@@ -5,12 +5,14 @@ import cats.effect._
 import cats.effect.std._
 import cats.syntax.all._
 import com.microsoft.java.debug.core.protocol._
+import com.microsoft.java.debug.core.protocol.Requests.EvaluateArguments
 import fs2._
 import fs2.concurrent.Signal
 import java.io.InputStream
 import java.net.URI
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.exceptions.SchemaFileLocation
+import org.apache.daffodil.infoset._
 import org.apache.daffodil.processors.parsers._
 import org.apache.daffodil.processors._
 import org.apache.daffodil.sapi.infoset.NullInfosetOutputter
@@ -18,12 +20,6 @@ import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import com.microsoft.java.debug.core.protocol.Requests.EvaluateArguments
-import org.apache.daffodil.infoset.DIDocument
-import org.apache.daffodil.infoset.InfosetElement
-import org.apache.daffodil.infoset.XMLTextInfosetOutputter
-import org.apache.daffodil.infoset.InfosetWalker
-import org.apache.daffodil.infoset.DIElement
 
 /** A running Daffodil parse. */
 object Parse {
