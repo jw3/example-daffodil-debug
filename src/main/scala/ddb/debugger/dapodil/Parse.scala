@@ -207,7 +207,9 @@ object Parse {
                           case (name, value) =>
                             new Types.Variable(
                               name.toQNameString,
-                              value.map(_.value.value.toString).getOrElse("???"),
+                              value
+                                .flatMap(v => Option(v.value.value).map(_.toString) orElse Some("null"))
+                                .getOrElse("???"),
                               value
                                 .map(_.state match {
                                   case VariableDefined      => "default"
