@@ -73,12 +73,12 @@ object Parse {
           case ec                                => Logger[IO].debug(s"parse: $ec")
         }
 
-      nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
-      nextScopeId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Scope.VariablesReference.apply)))
+      frameIds <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
+      variableRefs <- Resource.eval(Next.int.map(_.map(DAPodil.VariablesReference.apply)))
 
       debugeeData <- Stream
         .fromQueueNoneTerminated(parseEvents)
-        .through(fromParse(nextFrameId, nextScopeId))
+        .through(fromParse(frameIds, variableRefs))
         .holdResource(DAPodil.Data.empty)
     } yield new DAPodil.Debugee {
       def data(): Signal[IO, DAPodil.Data] =
@@ -128,13 +128,13 @@ object Parse {
   /** Translate parse events to updated Daffodil state. */
   def fromParse(
       frameIds: Next[DAPodil.Frame.Id],
-      scopeIds: Next[DAPodil.Frame.Scope.VariablesReference]
+      variableRefs: Next[DAPodil.VariablesReference]
   ): Stream[IO, Parse.Event] => Stream[IO, DAPodil.Data] =
     events =>
       events.evalScan(DAPodil.Data.empty) {
         case (_, Parse.Event.Init(_)) => IO.pure(DAPodil.Data.empty)
         case (prev, startElement: Parse.Event.StartElement) =>
-          createFrame(startElement, frameIds, scopeIds).map(prev.push)
+          createFrame(startElement, frameIds, variableRefs).map(prev.push)
         case (prev, Parse.Event.EndElement(_)) => IO.pure(prev.pop)
         case (prev, _: Parse.Event.Fini.type)  => IO.pure(prev)
       }
@@ -152,9 +152,9 @@ object Parse {
   def createFrame(
       startElement: Parse.Event.StartElement,
       frameIds: Next[DAPodil.Frame.Id],
-      scopeIds: Next[DAPodil.Frame.Scope.VariablesReference]
+      variableRefs: Next[DAPodil.VariablesReference]
   ): IO[DAPodil.Frame] =
-    (frameIds.next, scopeIds.next, scopeIds.next, scopeIds.next).mapN {
+    (frameIds.next, variableRefs.next, variableRefs.next, variableRefs.next).mapN {
       (
           frameId,
           parseScopeId,
@@ -191,13 +191,13 @@ object Parse {
           f <- dpr.field.toScalaOption
         } yield Misc.remapStringToVisibleGlyphs(f)
 
-        val schemaVariables: IO[Map[DAPodil.Frame.Scope.VariablesReference, List[Types.Variable]]] =
+        val schemaVariables: IO[Map[DAPodil.VariablesReference, List[Types.Variable]]] =
           startElement.state.variableMap.qnames.toList
             .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level?
             .toList
             .flatTraverse {
               case (ns, vs) =>
-                scopeIds.next.map { ref =>
+                variableRefs.next.map { ref =>
                   List(schemaScopeId -> List(new Types.Variable(ns.toString(), "", null, ref.value, null))) ++
                     List(
                       ref -> vs
