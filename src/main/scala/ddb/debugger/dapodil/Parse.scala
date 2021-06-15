@@ -227,7 +227,7 @@ object Parse {
                     )
                 }
             }
-            .map(_.toMap)
+            .map(_.foldMap(Map(_))) // combine values of map to accumulate namespaces
 
         val parseVariables: List[Types.Variable] =
           (List(
