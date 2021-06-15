@@ -193,7 +193,7 @@ object Parse {
 
         val schemaVariables: IO[Map[DAPodil.Frame.Scope.VariablesReference, List[Types.Variable]]] =
           startElement.state.variableMap.qnames.toList
-            .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level
+            .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level?
             .toList
             .flatTraverse {
               case (ns, vs) =>
