@@ -154,122 +154,133 @@ object Parse {
       frameIds: Next[DAPodil.Frame.Id],
       variableRefs: Next[DAPodil.VariablesReference]
   ): IO[DAPodil.Frame] =
-    (frameIds.next, variableRefs.next, variableRefs.next, variableRefs.next).mapN {
-      (
-          frameId,
-          parseScopeId,
-          schemaScopeId,
-          dataScopeId
-      ) =>
-        val stackFrame = new Types.StackFrame(
-          /* It must be unique across all threads.
-           * This id can be used to retrieve the scopes of the frame with the
-           * 'scopesRequest' or to restart the execution of a stackframe.
-           */
-          frameId.value,
-          startElement.name.getOrElse("???"),
-          /* If sourceReference > 0 the contents of the source must be retrieved through
-           * the SourceRequest (even if a path is specified). */
-          new Types.Source(startElement.schemaLocation.uriString, 0),
-          startElement.schemaLocation.lineNumber
-            .map(_.toInt)
-            .getOrElse(1), // line numbers start at 1 according to InitializeRequest
-          0 // column numbers start at 1 according to InitializeRequest, but set to 0 to ignore it; column calculation by Daffodil uses 1 tab = 2 spaces(?), but breakpoints use 1 character per tab
-        )
+    for {
+      ids <- (frameIds.next, variableRefs.next, variableRefs.next, variableRefs.next).tupled
+      (frameId, parseScopeId, schemaScopeId, dataScopeId) = ids
 
-        val bytePos1b = startElement.state.currentLocation.bytePos1b
-        val hidden = startElement.state.withinHiddenNest
-        val childIndex = if (startElement.state.childPos != -1) Some(startElement.state.childPos) else None
-        val groupIndex = if (startElement.state.groupPos != -1) Some(startElement.state.groupPos) else None
-        val occursIndex = if (startElement.state.arrayPos != -1) Some(startElement.state.arrayPos) else None
-        val foundDelimiter = for {
-          dpr <- startElement.state.delimitedParseResult.toScalaOption
-          dv <- dpr.matchedDelimiterValue.toScalaOption
-        } yield Misc.remapStringToVisibleGlyphs(dv)
-        val foundField = for {
-          dpr <- startElement.state.delimitedParseResult.toScalaOption
-          f <- dpr.field.toScalaOption
-        } yield Misc.remapStringToVisibleGlyphs(f)
+      stackFrame = new Types.StackFrame(
+        /* It must be unique across all threads.
+         * This id can be used to retrieve the scopes of the frame with the
+         * 'scopesRequest' or to restart the execution of a stackframe.
+         */
+        frameId.value,
+        startElement.name.getOrElse("???"),
+        /* If sourceReference > 0 the contents of the source must be retrieved through
+         * the SourceRequest (even if a path is specified). */
+        new Types.Source(startElement.schemaLocation.uriString, 0),
+        startElement.schemaLocation.lineNumber
+          .map(_.toInt)
+          .getOrElse(1), // line numbers start at 1 according to InitializeRequest
+        0 // column numbers start at 1 according to InitializeRequest, but set to 0 to ignore it; column calculation by Daffodil uses 1 tab = 2 spaces(?), but breakpoints use 1 character per tab
+      )
 
-        val schemaVariables: IO[Map[DAPodil.VariablesReference, List[Types.Variable]]] =
-          startElement.state.variableMap.qnames.toList
-            .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level?
-            .toList
-            .flatTraverse {
-              case (ns, vs) =>
-                variableRefs.next.map { ref =>
-                  List(schemaScopeId -> List(new Types.Variable(ns.toString(), "", null, ref.value, null))) ++
-                    List(
-                      ref -> vs
-                        .sortBy(_.toPrettyString)
-                        .fproduct(startElement.state.variableMap.find)
-                        .map {
-                          case (name, value) =>
-                            new Types.Variable(
-                              name.toQNameString,
-                              value
-                                .flatMap(v => Option(v.value.value).map(_.toString) orElse Some("null"))
-                                .getOrElse("???"),
-                              value
-                                .map(_.state match {
-                                  case VariableDefined      => "default"
-                                  case VariableRead         => "read"
-                                  case VariableSet          => "set"
-                                  case VariableUndefined    => "undefined"
-                                  case VariableBeingDefined => "being defined"
-                                  case VariableInProcess    => "in process"
-                                })
-                                .getOrElse("???"),
-                              0,
-                              null
-                            )
-                        }
-                    )
-                }
-            }
-            .map(_.foldMap(Map(_))) // combine values of map to accumulate namespaces
+      schemaScope <- schemaScope(schemaScopeId, startElement.state, variableRefs)
+    } yield DAPodil.Frame(
+      frameId,
+      stackFrame,
+      List(
+        parseScope(parseScopeId, startElement.state),
+        schemaScope,
+        dataScope(dataScopeId, startElement.state)
+      )
+    )
 
-        val parseVariables: List[Types.Variable] =
-          (List(
-            new Types.Variable("hidden", hidden.toString, "bool", 0, null)
-          ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
-            ++ groupIndex
-              .map(gi => new Types.Variable("groupIndex", gi.toString))
-              .toList
-            ++ occursIndex
-              .map(oi => new Types.Variable("occursIndex", oi.toString))
-              .toList
-            ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
-            ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
-            .sortBy(_.name)
+  def parseScope(ref: DAPodil.VariablesReference, state: StateForDebugger): DAPodil.Frame.Scope = {
+    val hidden = state.withinHiddenNest
+    val childIndex = if (state.childPos != -1) Some(state.childPos) else None
+    val groupIndex = if (state.groupPos != -1) Some(state.groupPos) else None
+    val occursIndex = if (state.arrayPos != -1) Some(state.arrayPos) else None
+    val foundDelimiter = for {
+      dpr <- state.delimitedParseResult.toScalaOption
+      dv <- dpr.matchedDelimiterValue.toScalaOption
+    } yield Misc.remapStringToVisibleGlyphs(dv)
+    val foundField = for {
+      dpr <- state.delimitedParseResult.toScalaOption
+      f <- dpr.field.toScalaOption
+    } yield Misc.remapStringToVisibleGlyphs(f)
 
-        val dataVariables: List[Types.Variable] =
-          List(new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null))
+    val parseVariables: List[Types.Variable] =
+      (List(
+        new Types.Variable("hidden", hidden.toString, "bool", 0, null)
+      ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
+        ++ groupIndex
+          .map(gi => new Types.Variable("groupIndex", gi.toString))
+          .toList
+        ++ occursIndex
+          .map(oi => new Types.Variable("occursIndex", oi.toString))
+          .toList
+        ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
+        ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
+        .sortBy(_.name)
 
-        schemaVariables.map(sv =>
-          DAPodil.Frame(
-            frameId,
-            stackFrame,
-            List(
-              DAPodil.Frame.Scope(
-                "Parse",
-                parseScopeId,
-                Map(parseScopeId -> parseVariables)
-              ),
-              DAPodil.Frame.Scope(
-                "Schema",
-                schemaScopeId,
-                sv
-              ),
-              DAPodil.Frame.Scope(
-                "Data",
-                dataScopeId,
-                Map(dataScopeId -> dataVariables)
+    DAPodil.Frame.Scope(
+      "Parse",
+      ref,
+      Map(ref -> parseVariables)
+    )
+  }
+
+  def schemaScope(
+      scopeRef: DAPodil.VariablesReference,
+      state: StateForDebugger,
+      refs: Next[DAPodil.VariablesReference]
+  ): IO[DAPodil.Frame.Scope] =
+    state.variableMap.qnames.toList
+      .groupBy(_.namespace) // TODO: handle NoNamespace or UnspecifiedNamespace as top-level?
+      .toList
+      .flatTraverse {
+        case (ns, vs) =>
+          // every namespace is a DAP variable in the current scope, and links to its set of Daffodil-as-DAP variables
+          refs.next.map { ref =>
+            List(scopeRef -> List(new Types.Variable(ns.toString(), "", null, ref.value, null))) ++
+              List(
+                ref -> vs
+                  .sortBy(_.toPrettyString)
+                  .fproduct(state.variableMap.find)
+                  .map {
+                    case (name, value) =>
+                      new Types.Variable(
+                        name.toQNameString,
+                        value
+                          .flatMap(v => Option(v.value.value).map(_.toString) orElse Some("null"))
+                          .getOrElse("???"),
+                        value
+                          .map(_.state match {
+                            case VariableDefined      => "default"
+                            case VariableRead         => "read"
+                            case VariableSet          => "set"
+                            case VariableUndefined    => "undefined"
+                            case VariableBeingDefined => "being defined"
+                            case VariableInProcess    => "in process"
+                          })
+                          .getOrElse("???"),
+                        0,
+                        null
+                      )
+                  }
               )
-            )
-          )
+          }
+      }
+      .map { refVars =>
+        val sv = refVars.foldMap(Map(_)) // combine values of map to accumulate namespaces
+        DAPodil.Frame.Scope(
+          "Schema",
+          scopeRef,
+          sv
         )
-    }.flatten
+      }
+
+  def dataScope(ref: DAPodil.VariablesReference, state: StateForDebugger): DAPodil.Frame.Scope = {
+    val bytePos1b = state.currentLocation.bytePos1b
+    val dataVariables: List[Types.Variable] =
+      List(new Types.Variable("bytePos1b", bytePos1b.toString, "number", 0, null))
+
+    DAPodil.Frame.Scope(
+      "Data",
+      ref,
+      Map(ref -> dataVariables)
+    )
+  }
 
   /** An algebraic data type that reifies the Daffodil `Debugger` callbacks. */
   sealed trait Event
