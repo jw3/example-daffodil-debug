@@ -49,7 +49,7 @@ object Parse {
         fs2.io
           .readOutputStream(4096) { os =>
             val stopper =
-              pleaseStop.get *> IO.canceled
+              pleaseStop.get *> IO.canceled // will cancel the concurrent parse effect
 
             val parse =
               IO.interruptible(true) {
@@ -58,9 +58,7 @@ object Parse {
                 .guaranteeCase(outcome => Logger[IO].debug(s"parse finished: $outcome"))
                 .void
 
-            Resource.fromAutoCloseable(IO.pure(os)).use { _ =>
-              stopper &> parse.guarantee(done.set(true))
-            }
+            stopper &> parse.guarantee(IO(os.close) *> done.set(true))
           }
 
       def close(): IO[Unit] =
