@@ -1,16 +1,20 @@
 package ddb.debugger.dapodil
 
 import cats.Show
+import cats.data._
 import cats.effect._
 import cats.effect.std._
 import cats.syntax.all._
+import com.google.gson.JsonObject
 import com.microsoft.java.debug.core.protocol._
-import com.microsoft.java.debug.core.protocol.Requests.EvaluateArguments
+import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
 import fs2.concurrent.Signal
 import fs2.io.file.Files
 import java.io._
 import java.net.URI
+import java.nio.file
+import java.nio.file.Paths
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.infoset._
@@ -21,6 +25,7 @@ import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import com.microsoft.java.debug.core.protocol.Messages.Request
 
 trait Parse {
 
@@ -114,10 +119,82 @@ object Parse {
       }
   }
 
+  object Debugee {
+
+    case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutput: LaunchArgs.InfosetOutput)
+        extends Arguments
+
+    object LaunchArgs {
+      sealed trait InfosetOutput
+
+      object InfosetOutput {
+        case object None extends InfosetOutput
+        case object Console extends InfosetOutput
+        case class File(path: file.Path) extends InfosetOutput
+      }
+
+      def parse(arguments: JsonObject): EitherNel[String, LaunchArgs] =
+        (
+          Option(arguments.getAsJsonPrimitive("program"))
+            .toRight("missing 'program' field from launch request")
+            .flatMap(path =>
+              Either
+                .catchNonFatal(Paths.get(path.getAsString))
+                .leftMap(t => s"'program' field from launch request is not a valid path: $t")
+            )
+            .toEitherNel,
+          Option(arguments.getAsJsonPrimitive("data"))
+            .toRight("missing 'data' field from launch request")
+            .flatMap(path =>
+              Either
+                .catchNonFatal(Paths.get(path.getAsString))
+                .leftMap(t => s"'data' field from launch request is not a valid path: $t")
+            )
+            .toEitherNel,
+          Option(arguments.getAsJsonObject("infosetOutput")) match {
+            case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+            case Some(infosetOutput) =>
+              Option(infosetOutput.getAsJsonPrimitive("type")) match {
+                case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+                case Some(typ) =>
+                  typ.getAsString() match {
+                    case "none"    => Right(LaunchArgs.InfosetOutput.None).toEitherNel
+                    case "console" => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+                    case "file" =>
+                      Option(infosetOutput.getAsJsonPrimitive("path"))
+                        .toRight("missing 'infosetOutput.path' field from launch request")
+                        .flatMap(path =>
+                          Either
+                            .catchNonFatal(LaunchArgs.InfosetOutput.File(Paths.get(path.getAsString)))
+                            .leftMap(t => s"'infosetOutput.path' field from launch request is not a valid path: $t")
+                        )
+                        .toEitherNel
+                    case invalidType =>
+                      Left(s"invalid 'infosetOutput.type': '$invalidType', must be 'none', 'console', or 'file'").toEitherNel
+                  }
+              }
+          }
+        ).parMapN(LaunchArgs.apply)
+    }
+  }
+
+  def debugee(request: Request): EitherNel[String, Resource[IO, DAPodil.Debugee]] =
+    Debugee.LaunchArgs.parse(request.arguments).map {
+      args =>
+      for {
+          schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
+          data <- Resource.eval(
+            IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
+              .map(new ByteArrayInputStream(_))
+          )
+          debugee <- debugee(schema, data, args.infosetOutput)
+        } yield debugee
+    }
+
   def debugee(
       schema: URI,
       in: InputStream,
-      infosetOutput: DAPodil.LaunchArgs.InfosetOutput
+      infosetOutput: Debugee.LaunchArgs.InfosetOutput
   ): Resource[IO, DAPodil.Debugee] =
     for {
       data <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Data]](10))
@@ -141,9 +218,9 @@ object Parse {
       parse <- Resource.eval(Parse(schema, in, debugger))
 
       infosetWriting = infosetOutput match {
-        case DAPodil.LaunchArgs.InfosetOutput.None =>
+        case Debugee.LaunchArgs.InfosetOutput.None =>
           parse.run().drain
-        case DAPodil.LaunchArgs.InfosetOutput.Console =>
+        case Debugee.LaunchArgs.InfosetOutput.Console =>
           parse
             .run()
             .through(text.utf8Decode)
@@ -151,7 +228,7 @@ object Parse {
             .evalTap(_ => Logger[IO].debug("done collecting infoset XML output"))
             .map(infosetXML => Events.OutputEvent.createConsoleOutput(infosetXML))
             .enqueueNoneTerminated(outputs)
-        case DAPodil.LaunchArgs.InfosetOutput.File(path) =>
+        case Debugee.LaunchArgs.InfosetOutput.File(path) =>
           parse.run().through(Files[IO].writeAll(path))
       }
 
