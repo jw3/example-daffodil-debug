@@ -14,15 +14,12 @@ import fs2._
 import fs2.concurrent.Signal
 import java.io._
 import java.net._
-import java.nio.file
-import java.nio.file.Paths
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import scala.collection.JavaConverters._
 
 import logging._
-import java.nio.file
 
 /** Communication interface to a DAP server while in a connected session. */
 trait DAPSession[R, E] {
@@ -48,7 +45,7 @@ class DAPodil(
     session: DAPSession[Response, DebugEvent],
     state: Ref[IO, DAPodil.State],
     hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resouce management
-    debugee: DAPodil.LaunchArgs => Resource[IO, DAPodil.Debugee],
+    debugee: Request => EitherNel[String, Resource[IO, DAPodil.Debugee]],
     whenDone: Deferred[IO, DAPodil.Done]
 ) extends DAPodil.RequestHandler {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
@@ -86,15 +83,8 @@ class DAPodil(
     request match {
       case extract(Command.INITIALIZE, _) => initialize(request)
       case extract(Command.LAUNCH, _)     =>
-        // We ignore the java-debug LaunchArguments because it is overspecialized for JVM debugging, and parse our own LaunchArgs type.
-        DAPodil.LaunchArgs
-          .parse(request)
-          .fold(
-            errors =>
-              Logger[IO].warn(show"error parsing launch args: ${errors.mkString_(", ")}") *> session
-                .sendResponse(request.respondFailure(Some(show"error parsing launch args: ${errors.mkString_(", ")}"))),
-            args => launch(request, args)
-          )
+        // We ignore the java-debug LaunchArguments because it is overspecialized for JVM debugging, and parse our own.
+        launch(request)
       case extract(Command.SETBREAKPOINTS, args: SetBreakpointArguments) => setBreakpoints(request, args)
       case extract(Command.THREADS, _)                                   => threads(request)
       case extract(Command.STACKTRACE, _)                                => stackTrace(request)
@@ -121,32 +111,38 @@ class DAPodil(
     }.flatten
 
   /** State.Initialized -> State.Launched */
-  def launch(request: Request, args: DAPodil.LaunchArgs): IO[Unit] =
+  def launch(request: Request): IO[Unit] =
     // TODO: ensure `launch` is atomic
     state.get.flatMap {
       case DAPodil.State.Initialized =>
-        for {
-          launched <- hotswap.swap {
-            DAPodil.State.Launched.resource(session, debugee(args))
-          }.attempt
+        debugee(request) match {
+          case Left(errors) =>
+            Logger[IO].warn(show"error parsing launch args: ${errors.mkString_(", ")}") *> session
+              .sendResponse(request.respondFailure(Some(show"error parsing launch args: ${errors.mkString_(", ")}")))
+          case Right(dbgee) =>
+            for {
+              launched <- hotswap.swap {
+                DAPodil.State.Launched.resource(session, dbgee)
+              }.attempt
 
-          _ <- launched match {
-            case Left(t) =>
-              Logger[IO].warn(t)(show"couldn't launch, request $request") *>
-                session.sendResponse(
-                  request.respondFailure(Some(show"Couldn't launch Daffodil debugger: ${t.getMessage()}"))
-                )
-            case Right(launchedState) =>
-              for {
-                _ <- session.sendResponse(request.respondSuccess())
+              _ <- launched match {
+                case Left(t) =>
+                  Logger[IO].warn(t)(show"couldn't launch, request $request") *>
+                    session.sendResponse(
+                      request.respondFailure(Some(show"Couldn't launch Daffodil debugger: ${t.getMessage()}"))
+                    )
+                case Right(launchedState) =>
+                  for {
+                    _ <- session.sendResponse(request.respondSuccess())
 
-                // send `Stopped` event to honor `"stopOnEntry":true`
-                _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
+                    // send `Stopped` event to honor `"stopOnEntry":true`
+                    _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
 
-                _ <- state.set(launchedState)
-              } yield ()
-          }
-        } yield ()
+                    _ <- state.set(launchedState)
+                  } yield ()
+              }
+            } yield ()
+        }
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
 
@@ -309,19 +305,8 @@ object DAPodil extends IOApp {
       socket <- IO.blocking(socket.accept())
       _ <- Logger[IO].info(s"connected at $uri")
 
-      // TODO: Replace with generic JSON request arguments parameter and have Debugee-factory parse it
-      debugee = (args: DAPodil.LaunchArgs) =>
-        for {
-          schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
-          data <- Resource.eval(
-            IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
-              .map(new ByteArrayInputStream(_))
-          )
-          debugee <- Parse.debugee(schema, data, args.infosetOutput)
-        } yield debugee
-
       done <- DAPodil
-        .resource(socket, debugee)
+        .resource(socket, Parse.debugee)
         .use(whenDone => Logger[IO].debug("whenDone: completed") *> whenDone)
       _ <- Logger[IO].info(s"disconnected at $uri")
     } yield done
@@ -329,7 +314,7 @@ object DAPodil extends IOApp {
   case class Done(restart: Boolean = false)
 
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def resource(socket: Socket, debugee: LaunchArgs => Resource[IO, Debugee]): Resource[IO, IO[Done]] =
+  def resource(socket: Socket, debugee: Request => EitherNel[String, Resource[IO, Debugee]]): Resource[IO, IO[Done]] =
     for {
       dispatcher <- Dispatcher[IO]
       requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
@@ -340,63 +325,6 @@ object DAPodil extends IOApp {
       dapodil = new DAPodil(DAPSession(server), state, hotswap, debugee, whenDone)
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
-
-  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutput: LaunchArgs.InfosetOutput)
-      extends Arguments
-
-  object LaunchArgs {
-    sealed trait InfosetOutput
-
-    object InfosetOutput {
-      case object None extends InfosetOutput
-      case object Console extends InfosetOutput
-      case class File(path: file.Path) extends InfosetOutput
-    }
-
-    def parse(request: Request): EitherNel[String, LaunchArgs] =
-      (
-        Option(request.arguments.getAsJsonPrimitive("program"))
-          .toRight("missing 'program' field from launch request")
-          .flatMap(path =>
-            Either
-              .catchNonFatal(Paths.get(path.getAsString))
-              .leftMap(t => s"'program' field from launch request is not a valid path: $t")
-          )
-          .toEitherNel,
-        Option(request.arguments.getAsJsonPrimitive("data"))
-          .toRight("missing 'data' field from launch request")
-          .flatMap(path =>
-            Either
-              .catchNonFatal(Paths.get(path.getAsString))
-              .leftMap(t => s"'data' field from launch request is not a valid path: $t")
-          )
-          .toEitherNel,
-        Option(request.arguments.getAsJsonObject("infosetOutput")) match {
-          case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
-          case Some(infosetOutput) =>
-            Option(infosetOutput.getAsJsonPrimitive("type")) match {
-              case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
-              case Some(typ) =>
-                typ.getAsString() match {
-                  case "none"    => Right(LaunchArgs.InfosetOutput.None).toEitherNel
-                  case "console" => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
-                  case "file" =>
-                    Option(infosetOutput.getAsJsonPrimitive("path"))
-                      .toRight("missing 'infosetOutput.path' field from launch request")
-                      .flatMap(path =>
-                        Either
-                          .catchNonFatal(LaunchArgs.InfosetOutput.File(Paths.get(path.getAsString)))
-                          .leftMap(t => s"'infosetOutput.path' field from launch request is not a valid path: $t")
-                      )
-                      .toEitherNel
-                  case invalidType =>
-                    Left(s"invalid 'infosetOutput.type': '$invalidType', must be 'none', 'console', or 'file'").toEitherNel
-                }
-            }
-        }
-      ).parMapN(LaunchArgs.apply)
-
-  }
 
   trait RequestHandler {
     def handle(request: Request): IO[Unit]
