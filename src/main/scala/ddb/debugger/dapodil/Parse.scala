@@ -11,7 +11,6 @@ import fs2.concurrent.Signal
 import fs2.io.file.Files
 import java.io._
 import java.net.URI
-import java.nio.file.Path
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.infoset._
@@ -118,7 +117,7 @@ object Parse {
   def debugee(
       schema: URI,
       in: InputStream,
-      infosetOutputPath: Option[Path]
+      infosetOutput: DAPodil.LaunchArgs.InfosetOutput
   ): Resource[IO, DAPodil.Debugee] =
     for {
       data <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Data]](10))
@@ -141,8 +140,10 @@ object Parse {
       debugger <- DaffodilDebugger.resource(state, outputs, events, breakpoints, control)
       parse <- Resource.eval(Parse(schema, in, debugger))
 
-      infosetWriting = infosetOutputPath match {
-        case None =>
+      infosetWriting = infosetOutput match {
+        case DAPodil.LaunchArgs.InfosetOutput.None =>
+          parse.run().drain
+        case DAPodil.LaunchArgs.InfosetOutput.Console =>
           parse
             .run()
             .through(text.utf8Decode)
@@ -150,7 +151,7 @@ object Parse {
             .evalTap(_ => Logger[IO].debug("done collecting infoset XML output"))
             .map(infosetXML => Events.OutputEvent.createConsoleOutput(infosetXML))
             .enqueueNoneTerminated(outputs)
-        case Some(path) =>
+        case DAPodil.LaunchArgs.InfosetOutput.File(path) =>
           parse.run().through(Files[IO].writeAll(path))
       }
 

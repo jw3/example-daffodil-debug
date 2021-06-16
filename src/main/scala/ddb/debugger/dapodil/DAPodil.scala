@@ -309,6 +309,7 @@ object DAPodil extends IOApp {
       socket <- IO.blocking(socket.accept())
       _ <- Logger[IO].info(s"connected at $uri")
 
+      // TODO: Replace with generic JSON request arguments parameter and have Debugee-factory parse it
       debugee = (args: DAPodil.LaunchArgs) =>
         for {
           schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
@@ -316,7 +317,7 @@ object DAPodil extends IOApp {
             IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
               .map(new ByteArrayInputStream(_))
           )
-          debugee <- Parse.debugee(schema, data, args.infosetOutputPath)
+          debugee <- Parse.debugee(schema, data, args.infosetOutput)
         } yield debugee
 
       done <- DAPodil
@@ -340,10 +341,18 @@ object DAPodil extends IOApp {
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
 
-  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutputPath: Option[file.Path])
+  case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutput: LaunchArgs.InfosetOutput)
       extends Arguments
 
   object LaunchArgs {
+    sealed trait InfosetOutput
+
+    object InfosetOutput {
+      case object None extends InfosetOutput
+      case object Console extends InfosetOutput
+      case class File(path: file.Path) extends InfosetOutput
+    }
+
     def parse(request: Request): EitherNel[String, LaunchArgs] =
       (
         Option(request.arguments.getAsJsonPrimitive("program"))
@@ -362,13 +371,28 @@ object DAPodil extends IOApp {
               .leftMap(t => s"'data' field from launch request is not a valid path: $t")
           )
           .toEitherNel,
-        Option(request.arguments.getAsJsonPrimitive("infosetOutputPath")) match {
-          case None => Option.empty[file.Path].asRight[String].toEitherNel
-          case Some(path) =>
-            Either
-              .catchNonFatal(Option(Paths.get(path.getAsString)))
-              .leftMap(t => s"'infosetOutputPath' field from launch request is not a valid path: $t")
-              .toEitherNel
+        Option(request.arguments.getAsJsonObject("infosetOutput")) match {
+          case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+          case Some(infosetOutput) =>
+            Option(infosetOutput.getAsJsonPrimitive("type")) match {
+              case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+              case Some(typ) =>
+                typ.getAsString() match {
+                  case "none"    => Right(LaunchArgs.InfosetOutput.None).toEitherNel
+                  case "console" => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
+                  case "file" =>
+                    Option(infosetOutput.getAsJsonPrimitive("path"))
+                      .toRight("missing 'infosetOutput.path' field from launch request")
+                      .flatMap(path =>
+                        Either
+                          .catchNonFatal(LaunchArgs.InfosetOutput.File(Paths.get(path.getAsString)))
+                          .leftMap(t => s"'infosetOutput.path' field from launch request is not a valid path: $t")
+                      )
+                      .toEitherNel
+                  case invalidType =>
+                    Left(s"invalid 'infosetOutput.type': '$invalidType', must be 'none', 'console', or 'file'").toEitherNel
+                }
+            }
         }
       ).parMapN(LaunchArgs.apply)
 
