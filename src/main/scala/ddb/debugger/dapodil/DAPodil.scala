@@ -104,6 +104,7 @@ class DAPodil(
       case extract(Command.CONTINUE, _)                                  => continue(request)
       case extract(Command.PAUSE, _)                                     => pause(request)
       case extract(Command.DISCONNECT, args: DisconnectArguments)        => disconnect(request, args)
+      case extract(Command.EVALUATE, args: EvaluateArguments)            => eval(request, args)
       case _                                                             => Logger[IO].warn(show"unhandled request $request") *> session.sendResponse(request.respondFailure())
     }
 
@@ -151,7 +152,7 @@ class DAPodil(
 
   def setBreakpoints(request: Request, args: SetBreakpointArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee, _) =>
+      case DAPodil.State.Launched(debugee) =>
         for {
           _ <- debugee.setBreakpoints(
             DAPodil.Path(args.source.path) -> args.breakpoints.toList.map(bp => DAPodil.Line(bp.line))
@@ -199,7 +200,7 @@ class DAPodil(
 
   def next(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee, _) =>
+      case DAPodil.State.Launched(debugee) =>
         for {
           _ <- debugee.step
           _ <- session.sendResponse(request.respondSuccess())
@@ -209,7 +210,7 @@ class DAPodil(
 
   def continue(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee, _) =>
+      case DAPodil.State.Launched(debugee) =>
         for {
           _ <- debugee.continue()
           _ <- session.sendResponse(request.respondSuccess())
@@ -219,7 +220,7 @@ class DAPodil(
 
   def pause(request: Request): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(debugee, _) =>
+      case DAPodil.State.Launched(debugee) =>
         for {
           _ <- debugee.pause()
           _ <- session.sendResponse(request.respondSuccess())
@@ -236,11 +237,11 @@ class DAPodil(
 
   def scopes(request: Request, args: ScopesArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, data) =>
+      case DAPodil.State.Launched(debugee) =>
         for {
-          data <- data.get
-          _ <- data.stack.frames
-            .find(_.stackFrame.id == args.frameId)
+          data <- debugee.data.get
+          _ <- data.stack
+            .findFrame(DAPodil.Frame.Id(args.frameId))
             .fold(
               session.sendResponse(request.respondFailure(Some(s"couldn't find scopes for frame ${args.frameId}")))
             ) { frame =>
@@ -254,12 +255,12 @@ class DAPodil(
 
   def variables(request: Request, args: VariablesArguments): IO[Unit] =
     state.get.flatMap {
-      case DAPodil.State.Launched(_, data) =>
+      case DAPodil.State.Launched(debugee) =>
         // return the variables for the requested "variablesReference", which is associated with a scope, which is associated with a stack frame
         for {
-          data <- data.get
+          data <- debugee.data.get
           _ <- data.stack
-            .find(DAPodil.Frame.Scope.VariablesReference(args.variablesReference))
+            .variables(DAPodil.VariablesReference(args.variablesReference))
             .fold(
               Logger[IO]
                 .warn(show"couldn't find variablesReference ${args.variablesReference} in stack ${data}") *> // TODO: handle better
@@ -267,6 +268,20 @@ class DAPodil(
             )(variables =>
               session.sendResponse(request.respondSuccess(new Responses.VariablesResponseBody(variables.asJava)))
             )
+        } yield ()
+      case s => DAPodil.InvalidState.raise(request, "Launched", s)
+    }
+
+  def eval(request: Request, args: EvaluateArguments): IO[Unit] =
+    state.get.flatMap {
+      case launched: DAPodil.State.Launched =>
+        for {
+          variable <- launched.debugee.eval(args)
+          _ <- variable match {
+            case None => session.sendResponse(request.respondFailure())
+            case Some(v) =>
+              session.sendResponse(request.respondSuccess(new Responses.EvaluateResponseBody(v.value, 0, null, 0)))
+          }
         } yield ()
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
@@ -399,7 +414,7 @@ object DAPodil extends IOApp {
   /** DAPodil launches the debugee which reports its state and handles debug commands. */
   trait Debugee {
     // TODO: extract "control" interface from "state" interface
-    def data(): Stream[IO, Data]
+    def data(): Signal[IO, Data]
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
 
@@ -407,6 +422,7 @@ object DAPodil extends IOApp {
     def continue(): IO[Unit]
     def pause(): IO[Unit]
     def setBreakpoints(breakpoints: (Path, List[Line])): IO[Unit]
+    def eval(args: EvaluateArguments): IO[Option[Types.Variable]]
   }
 
   object Debugee {
@@ -434,9 +450,9 @@ object DAPodil extends IOApp {
   object State {
     case object Uninitialized extends State
     case object Initialized extends State
-    case class Launched(debugee: Debugee, data: Signal[IO, Data]) extends State {
-      val stackTrace: IO[StackTrace] = data.get.map(_.stack)
-      val threads: IO[List[Types.Thread]] = data.get.map(_.threads)
+    case class Launched(debugee: Debugee) extends State {
+      val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stack)
+      val threads: IO[List[Types.Thread]] = debugee.data.get.map(_.threads)
     }
 
     object Launched {
@@ -464,13 +480,8 @@ object DAPodil extends IOApp {
             .evalMap(session.sendEvent)
             .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery: $ec"))
 
-          data <- debugee
-            .data()
-            .holdResource(Data.empty)
-            .onFinalizeCase(ec => Logger[IO].debug(s"debugee.data resource: $ec"))
-
           launched <- Stream
-            .emit(Launched(debugee, data))
+            .emit(Launched(debugee))
             .concurrently(stoppedEventsDelivery.merge(outputEventsDelivery))
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
@@ -518,9 +529,9 @@ object DAPodil extends IOApp {
     val empty: Data = Data(StackTrace.empty)
   }
 
-  case class Frame(stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
-    def find(reference: Frame.Scope.VariablesReference): Option[Frame.Scope] =
-      scopes.find(_.reference == reference)
+  case class Frame(id: Frame.Id, stackFrame: Types.StackFrame, scopes: List[Frame.Scope]) {
+    def variables(reference: VariablesReference): Option[List[Types.Variable]] =
+      scopes.collectFirstSome(_.variables.get(reference))
   }
 
   object Frame {
@@ -532,18 +543,15 @@ object DAPodil extends IOApp {
 
     case class Scope(
         name: String,
-        reference: Scope.VariablesReference,
-        variables: List[Types.Variable]
+        reference: VariablesReference,
+        variables: Map[VariablesReference, List[Types.Variable]]
     ) {
       def toDAP(): Types.Scope =
         new Types.Scope(name, reference.value, false)
     }
-
-    object Scope {
-      case class VariablesReference(value: Int) extends AnyVal
-    }
-
   }
+
+  case class VariablesReference(value: Int) extends AnyVal
 
   case class StackTrace(frames: List[Frame]) {
     def push(frame: Frame): StackTrace =
@@ -552,8 +560,11 @@ object DAPodil extends IOApp {
     def pop(): StackTrace =
       copy(frames.tail)
 
-    def find(reference: Frame.Scope.VariablesReference): Option[List[Types.Variable]] =
-      frames.collectFirstSome(_.find(reference)).map(_.variables)
+    def findFrame(frameId: Frame.Id): Option[Frame] =
+      frames.find(_.id == frameId)
+
+    def variables(reference: VariablesReference): Option[List[Types.Variable]] =
+      frames.collectFirstSome(_.variables(reference))
   }
 
   object StackTrace {
