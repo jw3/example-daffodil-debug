@@ -297,7 +297,7 @@ object Parse {
          * 'scopesRequest' or to restart the execution of a stackframe.
          */
         frameId.value,
-        startElement.name.getOrElse("???"),
+        startElement.name.map(_.value).getOrElse("???"),
         /* If sourceReference > 0 the contents of the source must be retrieved through
          * the SourceRequest (even if a path is specified). */
         new Types.Source(startElement.schemaLocation.uriString, 0),
@@ -420,13 +420,15 @@ object Parse {
 
   object Event {
     case class Init(state: StateForDebugger) extends Event
-    case class StartElement(state: StateForDebugger, name: Option[String], schemaLocation: SchemaFileLocation)
+    case class StartElement(state: StateForDebugger, name: Option[ElementName], schemaLocation: SchemaFileLocation)
         extends Event
     case class EndElement(state: StateForDebugger) extends Event
     case object Fini extends Event
 
     implicit val show: Show[Event] = Show.fromToString
   }
+
+  case class ElementName(value: String) extends AnyVal
 
   trait Breakpoints {
     def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit]
@@ -552,7 +554,7 @@ object Parse {
       dispatcher.unsafeRunSync {
         val push = Event.StartElement(
           pstate.copyStateForDebugger,
-          pstate.currentNode.toScalaOption.map(_.name),
+          pstate.currentNode.toScalaOption.map(element => ElementName(element.name)),
           pstate.schemaFileLocation
         )
         logger.debug("pre-offer") *>
