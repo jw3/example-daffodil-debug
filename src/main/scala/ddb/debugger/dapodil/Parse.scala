@@ -179,16 +179,15 @@ object Parse {
   }
 
   def debugee(request: Request): EitherNel[String, Resource[IO, DAPodil.Debugee]] =
-    Debugee.LaunchArgs.parse(request.arguments).map {
-      args =>
+    Debugee.LaunchArgs.parse(request.arguments).map { args =>
       for {
-          schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
-          data <- Resource.eval(
-            IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
-              .map(new ByteArrayInputStream(_))
-          )
-          debugee <- debugee(schema, data, args.infosetOutput)
-        } yield debugee
+        schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
+        data <- Resource.eval(
+          IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
+            .map(new ByteArrayInputStream(_))
+        )
+        debugee <- debugee(schema, data, args.infosetOutput)
+      } yield debugee
     }
 
   def debugee(
@@ -440,11 +439,23 @@ object Parse {
       }
   }
 
+  /** Behavior of a stepping debugger that can be running or stopped. */
   sealed trait Control {
+
+    /** Blocks if the current state is stopped, unblocking when a `step` or `continue` happens. Returns true if blocking happened, false otherwise. */
     def await(): IO[Boolean]
 
+    /** Start running. */
     def continue(): IO[Unit]
+
+    /** If stopped, advance one "step", remaining stopped.
+      *
+      * IMPORTANT: Shouldn't return until any work blocked by
+      * an `await` completes, otherwise the update that was waiting will race with the code that sees the `step` complete.
+      */
     def step(): IO[Unit]
+
+    /** Stop running. */
     def pause(): IO[Unit]
   }
 
@@ -458,19 +469,25 @@ object Parse {
       for {
         whenContinued <- Deferred[IO, Unit]
         state <- Ref[IO].of[State](Stopped(whenContinued))
+        nextAwait <- CyclicBarrier[IO](2)
+        _ <- nextAwait.await.start
       } yield new Control {
         def await(): IO[Boolean] =
           state.get.flatMap {
-            case Running                => IO.pure(false)
-            case Stopped(whenContinued) => whenContinued.get.as(true)
+            case Running => IO.pure(false)
+            case Stopped(whenContinued) =>
+              nextAwait.await *> // signal next await happened
+                whenContinued.get.as(true) // block
           }
 
         def step(): IO[Unit] =
           for {
             nextContinue <- Deferred[IO, Unit]
             _ <- state.modify {
-              case Running                => Running -> IO.unit
-              case Stopped(whenContinued) => Stopped(nextContinue) -> whenContinued.complete(())
+              case Running => Running -> IO.unit
+              case Stopped(whenContinued) =>
+                Stopped(nextContinue) -> whenContinued.complete(()) *> // wake up await-ers
+                  nextAwait.await // block until next await is invoked
             }.flatten
           } yield ()
 
@@ -491,6 +508,10 @@ object Parse {
       }
   }
 
+  /** The Daffodil `Debugger` interface is asynchronously invoked from a running parse,
+    * and always returns `Unit`. In order to invoke effects like `IO` but return `Unit`,
+    * we use a `Dispatcher` to execute the effects at this "outermost" layer (with respect to the effects).
+    */
   class DaffodilDebugger(
       dispatcher: Dispatcher[IO],
       previousState: Ref[IO, Option[StateForDebugger]],

@@ -239,6 +239,7 @@ class DAPodil(
           _ <- data.stack
             .findFrame(DAPodil.Frame.Id(args.frameId))
             .fold(
+              Logger[IO].warn(s"couldn't find scopes for frame ${args.frameId}: ${data.stack.frames.map(f => f.id -> f.stackFrame.name)}") *>
               session.sendResponse(request.respondFailure(Some(s"couldn't find scopes for frame ${args.frameId}")))
             ) { frame =>
               session.sendResponse(
