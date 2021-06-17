@@ -308,50 +308,65 @@ object Parse {
       )
 
       schemaScope <- schemaScope(schemaScopeId, startElement.state, variableRefs)
+      parseScope <- parseScope(parseScopeId, startElement, variableRefs)
     } yield DAPodil.Frame(
       frameId,
       stackFrame,
       List(
-        parseScope(parseScopeId, startElement.state),
+        parseScope,
         schemaScope,
         dataScope(dataScopeId, startElement.state)
       )
     )
 
-  def parseScope(ref: DAPodil.VariablesReference, state: StateForDebugger): DAPodil.Frame.Scope = {
-    val hidden = state.withinHiddenNest
-    val childIndex = if (state.childPos != -1) Some(state.childPos) else None
-    val groupIndex = if (state.groupPos != -1) Some(state.groupPos) else None
-    val occursIndex = if (state.arrayPos != -1) Some(state.arrayPos) else None
-    val foundDelimiter = for {
-      dpr <- state.delimitedParseResult.toScalaOption
-      dv <- dpr.matchedDelimiterValue.toScalaOption
-    } yield Misc.remapStringToVisibleGlyphs(dv)
-    val foundField = for {
-      dpr <- state.delimitedParseResult.toScalaOption
-      f <- dpr.field.toScalaOption
-    } yield Misc.remapStringToVisibleGlyphs(f)
+  def parseScope(
+      ref: DAPodil.VariablesReference,
+      event: Event.StartElement,
+      refs: Next[DAPodil.VariablesReference]
+  ): IO[DAPodil.Frame.Scope] =
+    refs.next.map { pouRef =>
+      val hidden = event.state.withinHiddenNest
+      val childIndex = if (event.state.childPos != -1) Some(event.state.childPos) else None
+      val groupIndex = if (event.state.groupPos != -1) Some(event.state.groupPos) else None
+      val occursIndex = if (event.state.arrayPos != -1) Some(event.state.arrayPos) else None
+      val foundDelimiter = for {
+        dpr <- event.state.delimitedParseResult.toScalaOption
+        dv <- dpr.matchedDelimiterValue.toScalaOption
+      } yield Misc.remapStringToVisibleGlyphs(dv)
+      val foundField = for {
+        dpr <- event.state.delimitedParseResult.toScalaOption
+        f <- dpr.field.toScalaOption
+      } yield Misc.remapStringToVisibleGlyphs(f)
 
-    val parseVariables: List[Types.Variable] =
-      (List(
-        new Types.Variable("hidden", hidden.toString, "bool", 0, null)
-      ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
-        ++ groupIndex
-          .map(gi => new Types.Variable("groupIndex", gi.toString))
-          .toList
-        ++ occursIndex
-          .map(oi => new Types.Variable("occursIndex", oi.toString))
-          .toList
-        ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
-        ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
-        .sortBy(_.name)
+      val pouRootVariable =
+        new Types.Variable("points of uncertainty", "", null, pouRef.value, null)
+      val pouVariables =
+        event.pointsOfUncertainty.map(pou => new Types.Variable(s"${pou.name.value}", s"${pou.context}"))
 
-    DAPodil.Frame.Scope(
-      "Parse",
-      ref,
-      Map(ref -> parseVariables)
-    )
-  }
+      val parseVariables: List[Types.Variable] =
+        (List(
+          new Types.Variable("hidden", hidden.toString, "bool", 0, null),
+          pouRootVariable
+        ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
+          ++ groupIndex
+            .map(gi => new Types.Variable("groupIndex", gi.toString))
+            .toList
+          ++ occursIndex
+            .map(oi => new Types.Variable("occursIndex", oi.toString))
+            .toList
+          ++ foundDelimiter.map(fd => new Types.Variable("foundDelimiter", fd)).toList
+          ++ foundField.map(ff => new Types.Variable("foundField", ff)).toList)
+          .sortBy(_.name)
+
+      DAPodil.Frame.Scope(
+        "Parse",
+        ref,
+        Map(
+          ref -> parseVariables,
+          pouRef -> pouVariables
+        )
+      )
+    }
 
   def schemaScope(
       scopeRef: DAPodil.VariablesReference,
@@ -420,8 +435,12 @@ object Parse {
 
   object Event {
     case class Init(state: StateForDebugger) extends Event
-    case class StartElement(state: StateForDebugger, name: Option[ElementName], schemaLocation: SchemaFileLocation)
-        extends Event
+    case class StartElement(
+        state: StateForDebugger,
+        name: Option[ElementName],
+        schemaLocation: SchemaFileLocation,
+        pointsOfUncertainty: List[PointOfUncertainty]
+    ) extends Event
     case class EndElement(state: StateForDebugger) extends Event
     case object Fini extends Event
 
@@ -429,6 +448,13 @@ object Parse {
   }
 
   case class ElementName(value: String) extends AnyVal
+
+  case class PointOfUncertainty(
+      bitPosition: Option[Long],
+      location: SchemaFileLocation,
+      name: ElementName,
+      context: String
+  )
 
   trait Breakpoints {
     def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit]
@@ -555,7 +581,15 @@ object Parse {
         val push = Event.StartElement(
           pstate.copyStateForDebugger,
           pstate.currentNode.toScalaOption.map(element => ElementName(element.name)),
-          pstate.schemaFileLocation
+          pstate.schemaFileLocation,
+          pstate.pointsOfUncertainty.iterator.toList.map(mark =>
+            PointOfUncertainty(
+              Option(mark.disMark).as(mark.bitPos0b),
+              mark.context.schemaFileLocation,
+              ElementName(mark.element.name),
+              mark.context.toString()
+            )
+          )
         )
         logger.debug("pre-offer") *>
           events.offer(Some(push)) *>
