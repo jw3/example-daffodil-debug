@@ -389,8 +389,14 @@ object DAPodil extends IOApp {
         sealed trait Reason
 
         object Reason {
+
+          /** The user requested a pause. */
           case object Pause extends Reason
+
+          /** The user requested a step, which completed, so now we are stopped again. */
           case object Step extends Reason
+
+          /** A breakpoint was hit. */
           case class BreakpointHit(location: DAPodil.Location) extends Reason
         }
       }
