@@ -373,6 +373,12 @@ object DAPodil extends IOApp {
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
 
+    def awaitFirstStackFrame(): IO[Unit] =
+      data.discrete
+        .collectFirst { case d if !d.stack.frames.isEmpty => () }
+        .compile
+        .lastOrError
+
     def step(): IO[Unit]
     def continue(): IO[Unit]
     def pause(): IO[Unit]
@@ -424,6 +430,12 @@ object DAPodil extends IOApp {
         for {
           _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
           debugee <- debugee.onFinalizeCase(ec => Logger[IO].debug(s"debugee: $ec"))
+
+          _ <- Resource.eval(
+            Logger[IO].debug("awaiting first stack frame") *>
+              debugee.awaitFirstStackFrame() *>
+              Logger[IO].debug("awaiting first stack frame: got it")
+          )
 
           stoppedEventsDelivery = debugee.state
             .collect { case s: Debugee.State.Stopped => s }
