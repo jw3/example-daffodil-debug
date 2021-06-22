@@ -569,8 +569,9 @@ object Parse {
       breakpoints
         .shouldBreak(location)
         .ifM(
-          control
-            .pause() *> state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Pause))),
+          control.pause() *>
+            state
+              .offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.BreakpointHit(location)))),
           IO.unit
         )
 
