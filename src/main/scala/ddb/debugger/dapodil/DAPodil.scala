@@ -134,10 +134,6 @@ class DAPodil(
                 case Right(launchedState) =>
                   for {
                     _ <- session.sendResponse(request.respondSuccess())
-
-                    // send `Stopped` event to honor `"stopOnEntry":true`
-                    _ <- session.sendEvent(new Events.StoppedEvent("entry", 1, true))
-
                     _ <- state.set(launchedState)
                   } yield ()
               }
@@ -398,6 +394,9 @@ object DAPodil extends IOApp {
 
         object Reason {
 
+          /** The launch requested "stop on entry", i.e., stop at the "first" possible place. May only be received once as the first stopped reason. */
+          case object Entry extends Reason
+
           /** The user requested a pause. */
           case object Pause extends Reason
 
@@ -467,6 +466,8 @@ object DAPodil extends IOApp {
     implicit val show: Show[State] = Show.fromToString
 
     def deliverStoppedEvents(session: DAPSession[Response, DebugEvent]): Debugee.State.Stopped => IO[Unit] = {
+      case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
+        session.sendEvent(new Events.StoppedEvent("entry", 1L))
       case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
         session.sendEvent(new Events.StoppedEvent("pause", 1L))
       case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Step) =>

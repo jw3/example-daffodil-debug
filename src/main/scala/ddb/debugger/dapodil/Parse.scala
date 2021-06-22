@@ -121,8 +121,19 @@ object Parse {
 
   object Debugee {
 
-    case class LaunchArgs(schemaPath: file.Path, dataPath: file.Path, infosetOutput: LaunchArgs.InfosetOutput)
-        extends Arguments
+    case class LaunchArgs(
+        schemaPath: file.Path,
+        dataPath: file.Path,
+        stopOnEntry: Boolean,
+        infosetOutput: LaunchArgs.InfosetOutput
+    ) extends Arguments {
+      def schemaURI: URI =
+        schemaPath.toUri
+
+      def data: IO[InputStream] =
+        IO.blocking(new FileInputStream(dataPath.toFile).readAllBytes())
+          .map(new ByteArrayInputStream(_))
+    }
 
     object LaunchArgs {
       sealed trait InfosetOutput
@@ -150,6 +161,11 @@ object Parse {
                 .catchNonFatal(Paths.get(path.getAsString))
                 .leftMap(t => s"'data' field from launch request is not a valid path: $t")
             )
+            .toEitherNel,
+          Option(arguments.getAsJsonPrimitive("stopOnEntry"))
+            .map(_.getAsBoolean())
+            .getOrElse(true)
+            .asRight[String]
             .toEitherNel,
           Option(arguments.getAsJsonObject("infosetOutput")) match {
             case None => Right(LaunchArgs.InfosetOutput.Console).toEitherNel
@@ -179,28 +195,21 @@ object Parse {
   }
 
   def debugee(request: Request): EitherNel[String, Resource[IO, DAPodil.Debugee]] =
-    Debugee.LaunchArgs.parse(request.arguments).map { args =>
-      for {
-        schema <- Resource.eval(IO.blocking(args.schemaPath.toUri))
-        data <- Resource.eval(
-          IO.blocking(new FileInputStream(args.dataPath.toFile).readAllBytes())
-            .map(new ByteArrayInputStream(_))
-        )
-        debugee <- debugee(schema, data, args.infosetOutput)
-      } yield debugee
-    }
+    Debugee.LaunchArgs.parse(request.arguments).map(debugee)
 
-  def debugee(
-      schema: URI,
-      in: InputStream,
-      infosetOutput: Debugee.LaunchArgs.InfosetOutput
-  ): Resource[IO, DAPodil.Debugee] =
+  def debugee(args: Debugee.LaunchArgs): Resource[IO, DAPodil.Debugee] =
     for {
       data <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Data]](10))
       state <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
       outputs <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
       breakpoints <- Resource.eval(Breakpoints())
-      control <- Resource.eval(Control.initial())
+
+      // ensure `control` and `state` agree: initial `state` element; `control` running vs. paused
+      control <- Resource.eval(Control.stopped()).evalTap { stoppedControl =>
+        if (args.stopOnEntry)
+          state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Entry)))
+        else stoppedControl.continue() *> state.offer(Some(DAPodil.Debugee.State.Running))
+      }
 
       latestData <- Stream.fromQueueNoneTerminated(data).holdResource(DAPodil.Data.empty)
       debugee = new Debugee(
@@ -214,9 +223,9 @@ object Parse {
 
       events <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
       debugger <- DaffodilDebugger.resource(state, outputs, events, breakpoints, control)
-      parse <- Resource.eval(Parse(schema, in, debugger))
+      parse <- Resource.eval(args.data.flatMap(in => Parse(args.schemaURI, in, debugger)))
 
-      infosetWriting = infosetOutput match {
+      infosetWriting = args.infosetOutput match {
         case Debugee.LaunchArgs.InfosetOutput.None =>
           parse.run().drain
         case Debugee.LaunchArgs.InfosetOutput.Console =>
@@ -465,7 +474,8 @@ object Parse {
     case object Running extends State
     case class Stopped(whenContinued: Deferred[IO, Unit]) extends State
 
-    def initial(): IO[Control] =
+    /** Create a control initialized to the `Stopped` state. */
+    def stopped(): IO[Control] =
       for {
         whenContinued <- Deferred[IO, Unit]
         state <- Ref[IO].of[State](Stopped(whenContinued))
