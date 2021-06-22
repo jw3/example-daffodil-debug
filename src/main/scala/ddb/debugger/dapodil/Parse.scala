@@ -231,12 +231,12 @@ object Parse {
           parse.run().through(Files[IO].writeAll(path))
       }
 
-      nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)))
-      nextScopeId <- Resource.eval(Next.int.map(_.map(DAPodil.VariablesReference.apply)))
+      nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)).flatTap(_.next())) // `.flatTap(_.next())`: ids start at 1
+      nextRef <- Resource.eval(Next.int.map(_.map(DAPodil.VariablesReference.apply)).flatTap(_.next())) // `.flatTap(_.next())`: ids start at 1
 
       deliverParseData = Stream
         .fromQueueNoneTerminated(events)
-        .through(fromParse(nextFrameId, nextScopeId))
+        .through(fromParse(nextFrameId, nextRef))
         .enqueueNoneTerminated(data)
 
       _ <- Stream
