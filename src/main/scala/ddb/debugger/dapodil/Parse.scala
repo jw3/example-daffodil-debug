@@ -472,46 +472,50 @@ object Parse {
 
     sealed trait State
     case object Running extends State
-    case class Stopped(whenContinued: Deferred[IO, Unit]) extends State
+    case class Stopped(whenContinued: Deferred[IO, Unit], nextAwaitStarted: Deferred[IO, Unit]) extends State
 
     /** Create a control initialized to the `Stopped` state. */
     def stopped(): IO[Control] =
       for {
         whenContinued <- Deferred[IO, Unit]
-        state <- Ref[IO].of[State](Stopped(whenContinued))
-        nextAwait <- CyclicBarrier[IO](2)
-        _ <- nextAwait.await.start
+        nextAwaitStarted <- Deferred[IO, Unit]
+        state <- Ref[IO].of[State](Stopped(whenContinued, nextAwaitStarted))
       } yield new Control {
         def await(): IO[Boolean] =
           state.get.flatMap {
             case Running => IO.pure(false)
-            case Stopped(whenContinued) =>
-              nextAwait.await *> // signal next await happened
-                whenContinued.get.as(true) // block
+            case Stopped(whenContinued, nextAwaitStarted) =>
+              nextAwaitStarted.complete(()) *> // signal next await happened
+                Logger[IO].debug("waiting to be continued...") *>
+                whenContinued.get.as(true) *> // block
+                Logger[IO].debug("... continued").as(true)
           }
 
         def step(): IO[Unit] =
           for {
             nextContinue <- Deferred[IO, Unit]
+            nextAwaitStarted <- Deferred[IO, Unit]
             _ <- state.modify {
               case Running => Running -> IO.unit
-              case Stopped(whenContinued) =>
-                Stopped(nextContinue) -> whenContinued.complete(()) *> // wake up await-ers
-                  nextAwait.await // block until next await is invoked
+              case Stopped(whenContinued, nextAwait) =>
+                Stopped(nextContinue, nextAwaitStarted) -> whenContinued.complete(()) *> // wake up await-ers
+                  nextAwait.get // block until next await is invoked
             }.flatten
           } yield ()
 
         def continue(): IO[Unit] =
           state.modify {
-            case Running                => Running -> IO.unit
-            case Stopped(whenContinued) => Running -> whenContinued.complete(()).void
+            case Running => Running -> IO.unit
+            case Stopped(whenContinued, _) =>
+              Running -> whenContinued.complete(()).void // wake up await-ers
           }.flatten
 
         def pause(): IO[Unit] =
           for {
             nextContinue <- Deferred[IO, Unit]
+            nextAwaitStarted <- Deferred[IO, Unit]
             _ <- state.update {
-              case Running    => Stopped(nextContinue)
+              case Running    => Stopped(nextContinue, nextAwaitStarted)
               case s: Stopped => s
             }
           } yield ()
