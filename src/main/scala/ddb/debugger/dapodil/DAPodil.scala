@@ -127,15 +127,14 @@ class DAPodil(
 
               _ <- launched match {
                 case Left(t) =>
-                  Logger[IO].warn(t)(show"couldn't launch, request $request") *>
+                  state.set(DAPodil.State.FailedToLaunch(request, t)) *>
+                    Logger[IO].warn(t)(show"couldn't launch, request $request") *>
                     session.sendResponse(
                       request.respondFailure(Some(show"Couldn't launch Daffodil debugger: ${t.getMessage()}"))
                     )
                 case Right(launchedState) =>
-                  for {
-                    _ <- session.sendResponse(request.respondSuccess())
-                    _ <- state.set(launchedState)
-                  } yield ()
+                  state.set(launchedState) *>
+                    session.sendResponse(request.respondSuccess())
               }
             } yield ()
         }
@@ -158,6 +157,9 @@ class DAPodil(
           )
           _ <- session.sendResponse(response)
         } yield ()
+      case _: DAPodil.State.FailedToLaunch =>
+        Logger[IO].warn("ignoring setBreakPoints request since previous launch failed") *>
+        session.sendResponse(request.respondFailure())
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
@@ -421,6 +423,7 @@ object DAPodil extends IOApp {
       val stackTrace: IO[StackTrace] = debugee.data.get.map(_.stack)
       val threads: IO[List[Types.Thread]] = debugee.data.get.map(_.threads)
     }
+    case class FailedToLaunch(request: Request, cause: Throwable) extends State
 
     object Launched {
       def resource(
@@ -428,7 +431,6 @@ object DAPodil extends IOApp {
           debugee: Resource[IO, Debugee]
       ): Resource[IO, Launched] =
         for {
-          _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
           debugee <- debugee.onFinalizeCase(ec => Logger[IO].debug(s"debugee: $ec"))
 
           _ <- Resource.eval(
@@ -461,6 +463,8 @@ object DAPodil extends IOApp {
             .resource
             .lastOrError
             .onFinalizeCase(ec => Logger[IO].debug(s"launched: $ec"))
+
+          _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
         } yield launched
     }
 
