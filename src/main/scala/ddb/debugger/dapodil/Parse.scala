@@ -103,8 +103,8 @@ object Parse {
         Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Pause))
       )
 
-    def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
-      breakpoints.setBreakpoints(args)
+    def setBreakpoints(path: DAPodil.Path, lines: List[DAPodil.Line]): IO[Unit] =
+      breakpoints.setBreakpoints(path, lines)
 
     def eval(args: EvaluateArguments): IO[Option[Types.Variable]] =
       args.expression match {
@@ -476,7 +476,7 @@ object Parse {
   case class Delimiter(kind: String, value: DFADelimiter)
 
   trait Breakpoints {
-    def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit]
+    def setBreakpoints(path: DAPodil.Path, lines: List[DAPodil.Line]): IO[Unit]
     def shouldBreak(location: DAPodil.Location): IO[Boolean]
   }
 
@@ -485,8 +485,8 @@ object Parse {
       for {
         breakpoints <- Ref[IO].of(DAPodil.Breakpoints.empty)
       } yield new Breakpoints {
-        def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit] =
-          breakpoints.update(bp => bp.copy(value = bp.value + args))
+        def setBreakpoints(path: DAPodil.Path, lines: List[DAPodil.Line]): IO[Unit] =
+          breakpoints.update(bp => bp.set(path, lines))
 
         def shouldBreak(location: DAPodil.Location): IO[Boolean] =
           for {
