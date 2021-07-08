@@ -383,6 +383,7 @@ object Parse {
       )
     }
 
+  // a.k.a. Daffodil variables
   def schemaScope(
       scopeRef: DAPodil.VariablesReference,
       state: StateForDebugger,
