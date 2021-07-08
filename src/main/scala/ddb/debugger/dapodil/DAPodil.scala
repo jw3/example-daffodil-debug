@@ -306,7 +306,7 @@ object DAPodil extends IOApp {
 
       done <- DAPodil
         .resource(socket, Parse.debugee)
-        .use(whenDone => Logger[IO].debug("whenDone: completed") *> whenDone)
+        .use(whenDone => whenDone <* Logger[IO].debug("whenDone: completed"))
       _ <- Logger[IO].info(s"disconnected at $uri")
     } yield done
 
