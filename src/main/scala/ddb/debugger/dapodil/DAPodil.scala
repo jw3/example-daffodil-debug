@@ -33,10 +33,10 @@ object DAPSession {
   def apply(server: AbstractProtocolServer): DAPSession[Response, DebugEvent] =
     new DAPSession[Response, DebugEvent] {
       def sendResponse(response: Response): IO[Unit] =
-        Logger[IO].debug(show"<R $response") *> IO.blocking(server.sendResponse(response))
+        Logger[IO].info(show"<R $response") *> IO.blocking(server.sendResponse(response))
 
       def sendEvent(event: DebugEvent): IO[Unit] =
-        Logger[IO].debug(show"<E $event") *> IO.blocking(server.sendEvent(event))
+        Logger[IO].info(show"<E $event") *> IO.blocking(server.sendEvent(event))
     }
 }
 
@@ -339,7 +339,7 @@ object DAPodil extends IOApp {
     def dispatchRequest(request: Request): Unit =
       dispatcher.unsafeRunSync {
         for {
-          _ <- Logger[IO].debug(show"R> $request")
+          _ <- Logger[IO].info(show"R> $request")
           handler <- requestHandler.get
           _ <- handler.handle(request).recoverWith {
             case t => Logger[IO].error(t)(show"error during handling of request $request")
