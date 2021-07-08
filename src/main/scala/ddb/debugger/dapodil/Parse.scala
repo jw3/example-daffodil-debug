@@ -18,6 +18,7 @@ import java.nio.file.Paths
 import org.apache.daffodil.debugger.Debugger
 import org.apache.daffodil.exceptions.SchemaFileLocation
 import org.apache.daffodil.infoset._
+import org.apache.daffodil.processors.dfa.DFADelimiter
 import org.apache.daffodil.processors.parsers._
 import org.apache.daffodil.processors._
 import org.apache.daffodil.sapi.infoset.XMLTextInfosetOutputter
@@ -324,7 +325,7 @@ object Parse {
       event: Event.StartElement,
       refs: Next[DAPodil.VariablesReference]
   ): IO[DAPodil.Frame.Scope] =
-    refs.next.map { pouRef =>
+    (refs.next, refs.next).mapN { (pouRef, delimiterStackRef) =>
       val hidden = event.state.withinHiddenNest
       val childIndex = if (event.state.childPos != -1) Some(event.state.childPos) else None
       val groupIndex = if (event.state.groupPos != -1) Some(event.state.groupPos) else None
@@ -343,10 +344,18 @@ object Parse {
       val pouVariables =
         event.pointsOfUncertainty.map(pou => new Types.Variable(s"${pou.name.value}", s"${pou.context}"))
 
+      val delimiterStackRootVariable =
+        new Types.Variable("delimiters", "", null, delimiterStackRef.value, null)
+      val delimiterStackVariables =
+        event.delimiterStack.map(delimiter =>
+          new Types.Variable(s"${delimiter.kind}:${delimiter.value.delimType}", s"${delimiter.value.lookingFor}")
+        )
+
       val parseVariables: List[Types.Variable] =
         (List(
           new Types.Variable("hidden", hidden.toString, "bool", 0, null),
-          pouRootVariable
+          pouRootVariable,
+          delimiterStackRootVariable
         ) ++ childIndex.map(ci => new Types.Variable("childIndex", ci.toString)).toList
           ++ groupIndex
             .map(gi => new Types.Variable("groupIndex", gi.toString))
@@ -363,7 +372,8 @@ object Parse {
         ref,
         Map(
           ref -> parseVariables,
-          pouRef -> pouVariables
+          pouRef -> pouVariables,
+          delimiterStackRef -> delimiterStackVariables
         )
       )
     }
@@ -439,7 +449,8 @@ object Parse {
         state: StateForDebugger,
         name: Option[ElementName],
         schemaLocation: SchemaFileLocation,
-        pointsOfUncertainty: List[PointOfUncertainty]
+        pointsOfUncertainty: List[PointOfUncertainty],
+        delimiterStack: List[Delimiter]
     ) extends Event
     case class EndElement(state: StateForDebugger) extends Event
     case object Fini extends Event
@@ -455,6 +466,8 @@ object Parse {
       name: ElementName,
       context: String
   )
+
+  case class Delimiter(kind: String, value: DFADelimiter)
 
   trait Breakpoints {
     def setBreakpoints(args: (DAPodil.Path, List[DAPodil.Line])): IO[Unit]
@@ -589,7 +602,12 @@ object Parse {
               ElementName(mark.element.name),
               mark.context.toString()
             )
-          )
+          ),
+          pstate.mpstate.delimiters.toList.zipWithIndex.map {
+            case (delimiter, i) =>
+              println(s"$i: $delimiter")
+              Delimiter(if (i < pstate.mpstate.delimitersLocalIndexStack.top) "remote" else "local", delimiter)
+          }
         )
         logger.debug("pre-offer") *>
           events.offer(Some(push)) *>
