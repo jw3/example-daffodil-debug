@@ -251,7 +251,12 @@ object Parse {
 
       _ <- Stream
         .emit(debugee)
-        .concurrently(Stream(infosetWriting, deliverParseData).parJoinUnbounded)
+        .concurrently(
+          Stream(
+            infosetWriting.onFinalizeCase(ec => Logger[IO].debug(s"infosetWriting: $ec")),
+            deliverParseData.onFinalizeCase(ec => Logger[IO].debug(s"deliverParseData: $ec"))
+          ).parJoinUnbounded
+        )
         .compile
         .resource
         .lastOrError
