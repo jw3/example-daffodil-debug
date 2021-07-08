@@ -439,22 +439,22 @@ object DAPodil extends IOApp {
           stoppedEventsDelivery = debugee.state
             .collect { case s: Debugee.State.Stopped => s }
             .evalMap(deliverStoppedEvents(session))
-            .onFinalizeCase {
-              case ec @ kernel.Resource.ExitCase.Errored(t) =>
-                Logger[IO].debug(s"deliverStoppedEvents: $ec") *> IO(t.printStackTrace())
-              case ec =>
-                Logger[IO].debug(s"deliverStoppedEvents: $ec") *>
-                  session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
-                  session.sendEvent(new Events.TerminatedEvent())
-            }
+            .onFinalizeCase(ec => Logger[IO].debug(s"deliverStoppedEvents: $ec"))
 
           outputEventsDelivery = debugee.outputs
             .evalMap(session.sendEvent)
             .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery: $ec"))
 
+          eventDelivery = stoppedEventsDelivery
+            .merge(outputEventsDelivery)
+            .onFinalize(
+              session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
+                session.sendEvent(new Events.TerminatedEvent())
+            )
+
           launched <- Stream
             .emit(Launched(debugee))
-            .concurrently(stoppedEventsDelivery.merge(outputEventsDelivery))
+            .concurrently(eventDelivery)
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
             .resource
