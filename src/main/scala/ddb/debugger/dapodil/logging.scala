@@ -10,8 +10,13 @@ object logging {
     request => s"#${request.seq} ${request.command} ${request.arguments}"
 
   // Note/warning: all response bodies *should* be translatable to JSON, so we decode them for logging.
-  implicit val responseShow: Show[Response] =
-    response => s"#${response.request_seq} ${response.command} ${if (response.success) "success" else "failure"} ${JsonUtils.toJson(response.body)}"
+  implicit val responseShow: Show[Response] = {
+    case response if response.command == "source" =>
+      s"#${response.request_seq} ${response.command} ${if (response.success) "success" else "failure"} <response body elided>"
+    case response =>
+      s"#${response.request_seq} ${response.command} ${if (response.success) "success" else "failure"} ${JsonUtils
+        .toJson(response.body)}"
+  }
 
   implicit val eventShow: Show[DebugEvent] = {
     case event: Events.StoppedEvent => s"${event.`type`} ${event.reason}"

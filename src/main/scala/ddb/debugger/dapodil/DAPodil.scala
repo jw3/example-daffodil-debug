@@ -10,6 +10,7 @@ import com.microsoft.java.debug.core.protocol._
 import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 import com.microsoft.java.debug.core.protocol.Requests._
+import com.microsoft.java.debug.core.protocol.Responses._
 import fs2._
 import fs2.concurrent.Signal
 import java.io._
@@ -81,10 +82,16 @@ class DAPodil(
   def handle(request: Request): IO[Unit] =
     // TODO: java-debug doesn't seem to support the Restart request
     request match {
-      case extract(Command.INITIALIZE, _) => initialize(request)
-      case extract(Command.LAUNCH, _)     =>
+      case extract(Command.INITIALIZE, _)        => initialize(request)
+      case extract(Command.CONFIGURATIONDONE, _) => session.sendResponse(request.respondSuccess())
+      case extract(Command.LAUNCH, _)            =>
         // We ignore the java-debug LaunchArguments because it is overspecialized for JVM debugging, and parse our own.
         launch(request)
+      case _ if request.command == "loadedSources" =>
+        // the loadedSources command isn't supported by java-debug, so we parse it ourselves
+        loadedSources(request)
+      case extract(Command.SOURCE, args: SourceArguments) =>
+        source(request, args)
       case extract(Command.SETBREAKPOINTS, args: SetBreakpointArguments) => setBreakpoints(request, args)
       case extract(Command.THREADS, _)                                   => threads(request)
       case extract(Command.STACKTRACE, _)                                => stackTrace(request)
@@ -102,8 +109,7 @@ class DAPodil(
   def initialize(request: Request): IO[Unit] =
     state.modify {
       case DAPodil.State.Uninitialized =>
-        // TODO: VSCode doesn't seem to notice supportsRestartRequest=true and sends Disconnect (+restart) requests instead
-        val response = request.respondSuccess(new Responses.InitializeResponseBody(new Types.Capabilities()))
+        val response = request.respondSuccess(DAPodil.Caps())
         DAPodil.State.Initialized -> (session.sendResponse(response) *> session.sendEvent(
           new Events.InitializedEvent()
         ))
@@ -141,6 +147,31 @@ class DAPodil(
       case s => DAPodil.InvalidState.raise(request, "Initialized", s)
     }
 
+  def loadedSources(request: Request): IO[Unit] =
+    state.get.flatMap {
+      case DAPodil.State.Launched(debugee) =>
+        debugee.sources.flatMap { sources =>
+          session.sendResponse(
+            request.respondSuccess(
+              DAPodil.LoadedSources(sources)
+            )
+          )
+        }
+      case _ => session.sendResponse(request.respondFailure())
+    }
+
+  def source(request: Request, args: SourceArguments): IO[Unit] =
+    state.get.flatMap {
+      case DAPodil.State.Launched(debugee) =>
+        debugee.sourceContent(DAPodil.Source.Ref(args.sourceReference)).flatMap {
+          case None =>
+            session.sendResponse(request.respondFailure(Some(s"unknown source ref ${args.sourceReference}")))
+          case Some(content) =>
+            session.sendResponse(request.respondSuccess(new SourceResponseBody(content.value, "text/xml")))
+        }
+      case _ => session.sendResponse(request.respondFailure())
+    }
+
   def setBreakpoints(request: Request, args: SetBreakpointArguments): IO[Unit] =
     state.get.flatMap {
       case DAPodil.State.Launched(debugee) =>
@@ -159,7 +190,7 @@ class DAPodil(
         } yield ()
       case _: DAPodil.State.FailedToLaunch =>
         Logger[IO].warn("ignoring setBreakPoints request since previous launch failed") *>
-        session.sendResponse(request.respondFailure())
+          session.sendResponse(request.respondFailure())
       case s => DAPodil.InvalidState.raise(request, "Launched", s)
     }
 
@@ -372,6 +403,10 @@ object DAPodil extends IOApp {
     def state(): Stream[IO, Debugee.State]
     def outputs(): Stream[IO, Events.OutputEvent]
 
+    def sources(): IO[List[Source]]
+    def sourceContent(ref: Source.Ref): IO[Option[Source.Content]]
+    def sourceChanges(): Stream[IO, Source]
+
     def awaitFirstStackFrame(): IO[Unit] =
       data.discrete
         .collectFirst { case d if !d.stack.frames.isEmpty => () }
@@ -448,8 +483,11 @@ object DAPodil extends IOApp {
             .evalMap(session.sendEvent)
             .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery: $ec"))
 
-          eventDelivery = stoppedEventsDelivery
-            .merge(outputEventsDelivery)
+          sourceEventsDelivery = debugee.sourceChanges
+            .evalMap(source => session.sendEvent(DAPodil.LoadedSourceEvent("changed", source.toDAP)))
+            .onFinalizeCase(ec => Logger[IO].debug(s"sourceEventsDelivery: $ec"))
+
+          eventDelivery = Stream(stoppedEventsDelivery, outputEventsDelivery, sourceEventsDelivery).parJoinUnbounded
             .onFinalize(
               session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
                 session.sendEvent(new Events.TerminatedEvent())
@@ -576,4 +614,48 @@ object DAPodil extends IOApp {
 
     implicit val show: Show[Breakpoints] = Show.fromToString
   }
+
+  // TODO: path *can* be optional for non-empty source reference ids; need to experiment
+  case class Source(path: java.nio.file.Path, ref: Option[Source.Ref]) {
+    def toDAP: Types.Source =
+      new Types.Source(path.toString, ref.map(_.value).getOrElse(0))
+  }
+
+  object Source {
+    case class Ref(value: Int) extends AnyVal
+
+    case class Content(value: String, mimeType: Option[String])
+  }
+
+  /** reason: new, changed, or removed */
+  case class LoadedSourceEvent(reason: String, source: Types.Source) extends Events.DebugEvent("loadedSource")
+
+  case class LoadedSources(sources: java.util.List[Types.Source])
+
+  object LoadedSources {
+    def apply(sources: List[Source]): LoadedSources =
+      LoadedSources(sources.map(_.toDAP).asJava)
+  }
+
+  /** Our own capabilities data type that is a superset of java-debug, which doesn't have `supportsLoadedSourcesRequest`.
+    *
+    * TODO: VSCode doesn't seem to notice supportsRestartRequest=true and sends Disconnect (+restart) requests instead
+    */
+  case class Caps(
+      supportsConfigurationDoneRequest: Boolean = true,
+      supportsHitConditionalBreakpoints: Boolean = false,
+      supportsConditionalBreakpoints: Boolean = false,
+      supportsEvaluateForHovers: Boolean = false,
+      supportsCompletionsRequest: Boolean = false,
+      supportsRestartFrame: Boolean = false,
+      supportsSetVariable: Boolean = false,
+      supportsRestartRequest: Boolean = false,
+      supportTerminateDebuggee: Boolean = false,
+      supportsDelayedStackTraceLoading: Boolean = false,
+      supportsLogPoints: Boolean = false,
+      supportsExceptionInfoRequest: Boolean = false,
+      supportsDataBreakpoints: Boolean = false,
+      supportsClipboardContext: Boolean = false,
+      supportsLoadedSourcesRequest: Boolean = true
+  )
 }

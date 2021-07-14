@@ -7,9 +7,10 @@ import cats.effect.std._
 import cats.syntax.all._
 import com.google.gson.JsonObject
 import com.microsoft.java.debug.core.protocol._
+import com.microsoft.java.debug.core.protocol.Messages.Request
 import com.microsoft.java.debug.core.protocol.Requests._
 import fs2._
-import fs2.concurrent.Signal
+import fs2.concurrent._
 import fs2.io.file.Files
 import java.io._
 import java.net.URI
@@ -26,7 +27,6 @@ import org.apache.daffodil.sapi.io.InputSourceDataInputStream
 import org.apache.daffodil.util.Misc
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import com.microsoft.java.debug.core.protocol.Messages.Request
 
 trait Parse {
 
@@ -74,6 +74,11 @@ object Parse {
     }
 
   class Debugee(
+      schema: DAPodil.Source,
+      data: DAPodil.Source,
+      infoset: Signal[IO, String],
+      dataDump: Signal[IO, String],
+      sourceChangeStream: Stream[IO, DAPodil.Source],
       outputData: Signal[IO, DAPodil.Data],
       outputState: Stream[IO, DAPodil.Debugee.State],
       stateSink: QueueSink[IO, Option[DAPodil.Debugee.State]],
@@ -89,6 +94,19 @@ object Parse {
 
     def outputs(): Stream[IO, Events.OutputEvent] =
       outputEvents
+
+    def sources(): IO[List[DAPodil.Source]] =
+      IO.pure(List(schema, data, infosetSource, dataDumpSource))
+
+    def sourceContent(ref: DAPodil.Source.Ref): IO[Option[DAPodil.Source.Content]] =
+      ref.value match {
+        case 1 => infoset.get.map(is => Some(DAPodil.Source.Content(is, Some("text/xml"))))
+        case 2 => dataDump.get.map(dump => Some(DAPodil.Source.Content(dump, Some("text/plain"))))
+        case _ => IO.pure(None)
+      }
+
+    def sourceChanges(): Stream[IO, DAPodil.Source] =
+      sourceChangeStream
 
     def step(): IO[Unit] =
       control.step() *> stateSink.offer(
@@ -195,6 +213,9 @@ object Parse {
     }
   }
 
+  val infosetSource = DAPodil.Source(file.Path.of("infoset"), Some(DAPodil.Source.Ref(1)))
+  val dataDumpSource = DAPodil.Source(file.Path.of("data"), Some(DAPodil.Source.Ref(2)))
+
   def debugee(request: Request): EitherNel[String, Resource[IO, DAPodil.Debugee]] =
     Debugee.LaunchArgs.parse(request.arguments).map(debugee)
 
@@ -204,6 +225,8 @@ object Parse {
       state <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
       outputs <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
       breakpoints <- Resource.eval(Breakpoints())
+      infoset <- Resource.eval(Queue.bounded[IO, Option[String]](10))
+      dataDump <- Resource.eval(Queue.bounded[IO, Option[String]](10))
 
       // ensure `control` and `state` agree: initial `state` element; `control` running vs. paused
       control <- Resource.eval(Control.stopped()).evalTap { stoppedControl =>
@@ -213,7 +236,31 @@ object Parse {
       }
 
       latestData <- Stream.fromQueueNoneTerminated(data).holdResource(DAPodil.Data.empty)
+
+      latestInfoset <- Resource.eval(SignallingRef[IO, String](""))
+      infosetChanges = Stream
+        .fromQueueNoneTerminated(infoset)
+        .evalTap(latestInfoset.set)
+        .onFinalizeCase(ec => Logger[IO].debug(s"infosetChanges (orig): $ec"))
+
+      latestDataDump <- Resource.eval(SignallingRef[IO, String](""))
+      dataDumpChanges = Stream.fromQueueNoneTerminated(dataDump).evalTap(latestDataDump.set)
+
+      sourceChanges = Stream(
+        infosetChanges
+          .as(infosetSource)
+          .debug()
+          .onFinalizeCase(ec => Logger[IO].debug(s"infosetChanges: $ec")),
+        dataDumpChanges.as(dataDumpSource).onFinalizeCase(ec => Logger[IO].debug(s"dataDumpChanges: $ec"))
+      ).parJoinUnbounded
+        .onFinalizeCase(ec => Logger[IO].debug(s"sourceChanges: $ec"))
+
       debugee = new Debugee(
+        DAPodil.Source(args.schemaPath, None),
+        DAPodil.Source(args.dataPath, None),
+        latestInfoset,
+        latestDataDump,
+        sourceChanges,
         latestData,
         Stream.fromQueueNoneTerminated(state),
         state,
@@ -223,7 +270,8 @@ object Parse {
       )
 
       events <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
-      debugger <- DaffodilDebugger.resource(state, outputs, events, breakpoints, control)
+      debugger <- DaffodilDebugger
+        .resource(state, events, breakpoints, control, infoset, dataDump)
       parse <- Resource.eval(args.data.flatMap(in => Parse(args.schemaURI, in, debugger)))
 
       infosetWriting = args.infosetOutput match {
@@ -577,10 +625,11 @@ object Parse {
       dispatcher: Dispatcher[IO],
       previousState: Ref[IO, Option[StateForDebugger]],
       state: QueueSink[IO, Option[DAPodil.Debugee.State]],
-      sendOutput: QueueSink[IO, Option[Events.OutputEvent]],
       breakpoints: Breakpoints,
       control: Control,
-      events: QueueSink[IO, Option[Event]]
+      events: QueueSink[IO, Option[Event]],
+      infoset: QueueSink[IO, Option[String]],
+      dataDump: QueueSink[IO, Option[String]]
   ) extends Debugger {
 
     override def init(pstate: PState, processor: Parser): Unit =
@@ -591,8 +640,13 @@ object Parse {
 
     override def fini(processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        events.offer(Some(Event.Fini)) *> events.offer(None) *> // no more events after this
-          state.offer(None) // no more states == the parse is terminated
+        events.offer(Some(Event.Fini)) *>
+          events.offer(None) *> // no more events after this
+          state.offer(None) *> // no more states == the parse is terminated
+          infoset.offer(None) *>
+          Logger[IO].debug("infoset queue completed") *>
+          dataDump.offer(None) *>
+          Logger[IO].debug("dataDump queue completed")
       }
 
     override def startElement(pstate: PState, processor: Parser): Unit =
@@ -615,6 +669,18 @@ object Parse {
               Delimiter(if (i < pstate.mpstate.delimitersLocalIndexStack.top) "remote" else "local", delimiter)
           }
         )
+        val setInfoset = {
+          var node = pstate.infoset
+          while (node.diParent != null) node = node.diParent
+          node match {
+            case d: DIDocument if d.contents.size == 0 => IO.unit
+            case _                                     => infoset.offer(Some(infosetToString(node)))
+          }
+        }
+
+        val setData =
+          dataDump(pstate).flatMap(dump => dump.traverse(dump => dataDump.offer(Some(dump))))
+
         logger.debug("pre-offer") *>
           events.offer(Some(push)) *>
           logger.debug("pre-checkBreakpoints") *>
@@ -623,21 +689,33 @@ object Parse {
           // may block until external control says to unblock, for stepping behavior
           control
             .await()
-            .ifM(sendOutput(pstate), IO.unit) *> // if we are stepping, send output events, otherwise no-op
+            .ifM(
+              setInfoset *>
+                setData,
+              IO.unit
+            ) *> // if we are stepping, send events, otherwise no-op
           logger.debug("post-control await") *>
           previousState.set(Some(pstate.copyStateForDebugger))
       }
 
-    def sendOutput(state: PState): IO[Unit] =
-      for {
-        prev <- previousState.get
-        _ <- prev.traverse { prestate =>
-          val dataLoc = prestate.currentLocation.asInstanceOf[DataLoc]
-          val lines = dataLoc.dump(None, prestate.currentLocation, state)
+    def infosetToString(ie: InfosetElement): String = {
+      val bos = new java.io.ByteArrayOutputStream()
+      val xml = new XMLTextInfosetOutputter(bos, true)
+      val iw = InfosetWalker(
+        ie.asInstanceOf[DIElement],
+        xml,
+        walkHidden = false,
+        ignoreBlocks = true,
+        releaseUnneededInfoset = false
+      )
+      iw.walk(lastWalk = true)
+      bos.toString("UTF-8")
+    }
 
-          sendOutput.offer(Some(Events.OutputEvent.createConsoleOutput(lines + "\n")))
-        }
-      } yield ()
+    def dataDump(state: PState): IO[Option[String]] =
+      previousState.get.map { prestate =>
+        prestate.map(p => p.currentLocation.asInstanceOf[DataLoc].dump(None, p.currentLocation, state) + "\n")
+      }
 
     def checkBreakpoints(location: DAPodil.Location): IO[Unit] =
       breakpoints
@@ -658,10 +736,11 @@ object Parse {
   object DaffodilDebugger {
     def resource(
         state: QueueSink[IO, Option[DAPodil.Debugee.State]],
-        outputs: QueueSink[IO, Option[Events.OutputEvent]],
         events: QueueSink[IO, Option[Event]],
         breakpoints: Breakpoints,
-        control: Control
+        control: Control,
+        infoset: QueueSink[IO, Option[String]],
+        data: QueueSink[IO, Option[String]]
     ): Resource[IO, DaffodilDebugger] =
       for {
         dispatcher <- Dispatcher[IO]
@@ -670,10 +749,11 @@ object Parse {
         dispatcher,
         previousState,
         state,
-        outputs,
         breakpoints,
         control,
-        events
+        events,
+        infoset,
+        data
       )
   }
 }
