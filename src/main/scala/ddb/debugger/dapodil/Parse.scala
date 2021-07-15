@@ -688,11 +688,11 @@ object Parse {
           // may block until external control says to unblock, for stepping behavior
           control
             .await()
-            .ifM(
+            .ifM( // if we are stepping, send events, otherwise no-op
               setInfoset *>
                 setData,
               IO.unit
-            ) *> // if we are stepping, send events, otherwise no-op
+            ) *>
           logger.debug("post-control await") *>
           previousState.set(Some(pstate.copyStateForDebugger))
       }
