@@ -591,9 +591,11 @@ object Parse {
             nextAwaitStarted <- Deferred[IO, Unit]
             _ <- state.modify {
               case Running => Running -> IO.unit
-              case Stopped(whenContinued, nextAwait) =>
-                Stopped(nextContinue, nextAwaitStarted) -> whenContinued.complete(()) *> // wake up await-ers
-                  nextAwait.get // block until next await is invoked
+              case Stopped(whenContinued, _) =>
+                Stopped(nextContinue, nextAwaitStarted) -> (
+                  whenContinued.complete(()) *> // wake up await-ers
+                  nextAwaitStarted.get // block until next await is invoked
+                )
             }.flatten
           } yield ()
 
