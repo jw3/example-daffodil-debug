@@ -249,7 +249,6 @@ object Parse {
       sourceChanges = Stream(
         infosetChanges
           .as(infosetSource)
-          .debug()
           .onFinalizeCase(ec => Logger[IO].debug(s"infosetChanges: $ec")),
         dataDumpChanges.as(dataDumpSource).onFinalizeCase(ec => Logger[IO].debug(s"dataDumpChanges: $ec"))
       ).parJoinUnbounded
