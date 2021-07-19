@@ -82,7 +82,7 @@ object Parse {
       outputData: Signal[IO, DAPodil.Data],
       outputState: Stream[IO, DAPodil.Debugee.State],
       stateSink: QueueSink[IO, Option[DAPodil.Debugee.State]],
-      outputEvents: Stream[IO, Events.OutputEvent],
+      events: Stream[IO, Events.DebugEvent],
       breakpoints: Breakpoints,
       control: Control
   ) extends DAPodil.Debugee {
@@ -92,11 +92,12 @@ object Parse {
     def state(): Stream[IO, DAPodil.Debugee.State] =
       outputState
 
-    def outputs(): Stream[IO, Events.OutputEvent] =
-      outputEvents
+    def events(): Stream[IO, Events.DebugEvent] =
+      events
 
+    /** We return only the "static" sources of the schema and data file, and notify the debugger of additional sources via source change events, which only subsequently fetch the content directly (not via another `sources` call). */
     def sources(): IO[List[DAPodil.Source]] =
-      IO.pure(List(schema, data, infosetSource, dataDumpSource))
+      IO.pure(List(schema, data))
 
     def sourceContent(ref: DAPodil.Source.Ref): IO[Option[DAPodil.Source.Content]] =
       ref.value match {
@@ -140,6 +141,7 @@ object Parse {
 
   object Debugee {
 
+    // TODO: feature flags for infoset and data position event strategies (loadedSource event vs. custom event)
     case class LaunchArgs(
         schemaPath: file.Path,
         dataPath: file.Path,
@@ -223,7 +225,7 @@ object Parse {
     for {
       data <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Data]](10))
       state <- Resource.eval(Queue.bounded[IO, Option[DAPodil.Debugee.State]](10))
-      outputs <- Resource.eval(Queue.bounded[IO, Option[Events.OutputEvent]](10))
+      dapEvents <- Resource.eval(Queue.bounded[IO, Option[Events.DebugEvent]](10))
       breakpoints <- Resource.eval(Breakpoints())
       infoset <- Resource.eval(Queue.bounded[IO, Option[String]](10))
       dataDump <- Resource.eval(Queue.bounded[IO, Option[String]](10))
@@ -241,6 +243,7 @@ object Parse {
       infosetChanges = Stream
         .fromQueueNoneTerminated(infoset)
         .evalTap(latestInfoset.set)
+        .evalTap(content => dapEvents.offer(Some(InfosetEvent(content, "text/xml"))))
         .onFinalizeCase(ec => Logger[IO].debug(s"infosetChanges (orig): $ec"))
 
       latestDataDump <- Resource.eval(SignallingRef[IO, String](""))
@@ -263,7 +266,7 @@ object Parse {
         latestData,
         Stream.fromQueueNoneTerminated(state),
         state,
-        Stream.fromQueueNoneTerminated(outputs),
+        Stream.fromQueueNoneTerminated(dapEvents),
         breakpoints,
         control
       )
@@ -283,7 +286,7 @@ object Parse {
             .foldMonoid
             .evalTap(_ => Logger[IO].debug("done collecting infoset XML output"))
             .map(infosetXML => Events.OutputEvent.createConsoleOutput(infosetXML))
-            .enqueueNoneTerminated(outputs)
+            .enqueueNoneTerminated(dapEvents)
         case Debugee.LaunchArgs.InfosetOutput.File(path) =>
           parse.run().through(Files[IO].writeAll(path))
       }
@@ -293,6 +296,10 @@ object Parse {
 
       deliverParseData = Stream
         .fromQueueNoneTerminated(events)
+        .evalTap {
+          case start: Event.StartElement => dapEvents.offer(Some(DataEvent(start.state.currentLocation.bytePos1b)))
+          case _                         => IO.unit
+        }
         .through(fromParse(nextFrameId, nextRef))
         .enqueueNoneTerminated(data)
 
@@ -542,6 +549,9 @@ object Parse {
       }
   }
 
+  case class DataEvent(bytePos1b: Long) extends Events.DebugEvent("daffodil.data")
+  case class InfosetEvent(content: String, mimeType: String) extends Events.DebugEvent("daffodil.infoset")
+
   /** Behavior of a stepping debugger that can be running or stopped. */
   sealed trait Control {
 
@@ -594,7 +604,7 @@ object Parse {
               case Stopped(whenContinued, _) =>
                 Stopped(nextContinue, nextAwaitStarted) -> (
                   whenContinued.complete(()) *> // wake up await-ers
-                  nextAwaitStarted.get // block until next await is invoked
+                    nextAwaitStarted.get // block until next await is invoked
                 )
             }.flatten
           } yield ()

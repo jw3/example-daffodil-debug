@@ -401,7 +401,7 @@ object DAPodil extends IOApp {
     // TODO: extract "control" interface from "state" interface
     def data(): Signal[IO, Data]
     def state(): Stream[IO, Debugee.State]
-    def outputs(): Stream[IO, Events.OutputEvent]
+    def events(): Stream[IO, Events.DebugEvent]
 
     def sources(): IO[List[Source]]
     def sourceContent(ref: Source.Ref): IO[Option[Source.Content]]
