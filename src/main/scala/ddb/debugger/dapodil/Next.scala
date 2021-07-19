@@ -12,6 +12,7 @@ trait Next[A] {
 }
 
 object Next {
+  // TODO: optional starting value
   def int: IO[Next[Int]] =
     for {
       ids <- Ref[IO].of(0)
