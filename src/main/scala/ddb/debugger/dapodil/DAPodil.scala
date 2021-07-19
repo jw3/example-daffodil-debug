@@ -475,19 +475,27 @@ object DAPodil extends IOApp {
           )
 
           stoppedEventsDelivery = debugee.state
-            .collect { case s: Debugee.State.Stopped => s }
-            .evalMap(deliverStoppedEvents(session))
+            .collect {
+              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
+                new Events.StoppedEvent("entry", 1L)
+              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
+                new Events.StoppedEvent("pause", 1L)
+              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Step) =>
+                new Events.StoppedEvent("step", 1L)
+              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.BreakpointHit(_)) =>
+                new Events.StoppedEvent("breakpoint", 1L)
+            }
             .onFinalizeCase(ec => Logger[IO].debug(s"deliverStoppedEvents: $ec"))
 
-          outputEventsDelivery = debugee.outputs
-            .evalMap(session.sendEvent)
-            .onFinalizeCase(ec => Logger[IO].debug(s"outputEventsDelivery: $ec"))
+          dapEvents = debugee.events
+            .onFinalizeCase(ec => Logger[IO].debug(s"dapEvents: $ec"))
 
           sourceEventsDelivery = debugee.sourceChanges
-            .evalMap(source => session.sendEvent(DAPodil.LoadedSourceEvent("changed", source.toDAP)))
+            .map(source => DAPodil.LoadedSourceEvent("changed", source.toDAP))
             .onFinalizeCase(ec => Logger[IO].debug(s"sourceEventsDelivery: $ec"))
 
-          eventDelivery = Stream(stoppedEventsDelivery, outputEventsDelivery, sourceEventsDelivery).parJoinUnbounded
+          eventDelivery = Stream(stoppedEventsDelivery, dapEvents, sourceEventsDelivery).parJoinUnbounded
+            .evalMap(session.sendEvent)
             .onFinalize(
               session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
                 session.sendEvent(new Events.TerminatedEvent())
@@ -507,17 +515,6 @@ object DAPodil extends IOApp {
     }
 
     implicit val show: Show[State] = Show.fromToString
-
-    def deliverStoppedEvents(session: DAPSession[Response, DebugEvent]): Debugee.State.Stopped => IO[Unit] = {
-      case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
-        session.sendEvent(new Events.StoppedEvent("entry", 1L))
-      case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
-        session.sendEvent(new Events.StoppedEvent("pause", 1L))
-      case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Step) =>
-        session.sendEvent(new Events.StoppedEvent("step", 1L))
-      case Debugee.State.Stopped(Debugee.State.Stopped.Reason.BreakpointHit(_)) =>
-        session.sendEvent(new Events.StoppedEvent("breakpoint", 1L))
-    }
   }
 
   case class InvalidState(request: Request, expected: String, actual: State)
