@@ -11,6 +11,8 @@ import com.microsoft.java.debug.core.protocol.Messages._
 import com.microsoft.java.debug.core.protocol.Events.DebugEvent
 import com.microsoft.java.debug.core.protocol.Requests._
 import com.microsoft.java.debug.core.protocol.Responses._
+import com.monovore.decline.Opts
+import com.monovore.decline.effect.CommandIOApp
 import fs2._
 import fs2.concurrent.Signal
 import java.io._
@@ -19,6 +21,7 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import scala.collection.JavaConverters._
+import scala.concurrent.duration._
 
 import logging._
 
@@ -318,19 +321,42 @@ class DAPodil(
 
 object DAPodil extends IOApp {
 
+  val opts: Opts[Options] =
+    (
+      Opts
+        .option[Int]("listenPort", "port to listen on for DAP client connection (default: 4711)")
+        .withDefault(4711),
+      Opts
+        .option[Duration]("listenTimeout", "duration to wait for a DAP client connection (default: 10s)")
+        .withDefault(10.seconds)
+    ).mapN(Options)
+
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   def run(args: List[String]): IO[ExitCode] =
+    CommandIOApp.run("DAPodil", "DAPOdil -- A DAP server for debugging Daffodil schema processors.")(opts.map(run), args)
+
+  def run(options: Options): IO[ExitCode] =
     for {
       state <- Ref[IO].of[State](State.Uninitialized)
 
-      address = new InetSocketAddress(4711)
-      serverSocket = new ServerSocket(address.getPort, 1, address.getAddress)
+      address = new InetSocketAddress(options.listenPort)
+      serverSocket = {
+        val ss = new ServerSocket(address.getPort, 1, address.getAddress)
+        ss.setSoTimeout(options.listenTimeout.toMillis.toInt)
+        ss
+      }
       uri = URI.create(s"tcp://${address.getHostString}:${serverSocket.getLocalPort}")
 
-      _ <- listen(serverSocket, uri).iterateWhile((_.restart))
+      code <- listen(serverSocket, uri)
+        .iterateWhile(_.restart)
+        .as(ExitCode.Success)
+        .recoverWith {
+          case _: SocketTimeoutException =>
+            Logger[IO].warn(s"timed out listening for connection on $uri, exiting").as(ExitCode.Error)
+        }
 
-    } yield ExitCode.Success
+    } yield code
 
   def listen(socket: ServerSocket, uri: URI): IO[Done] =
     for {
@@ -344,8 +370,6 @@ object DAPodil extends IOApp {
       _ <- Logger[IO].info(s"disconnected at $uri")
     } yield done
 
-  case class Done(restart: Boolean = false)
-
   /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
   def resource(socket: Socket, debugee: Request => EitherNel[String, Resource[IO, Debugee]]): Resource[IO, IO[Done]] =
     for {
@@ -358,6 +382,10 @@ object DAPodil extends IOApp {
       dapodil = new DAPodil(DAPSession(server), state, hotswap, debugee, whenDone)
       _ <- Resource.eval(requestHandler.complete(dapodil))
     } yield whenDone.get
+
+  case class Done(restart: Boolean = false)
+
+  case class Options(listenPort: Int, listenTimeout: Duration)
 
   trait RequestHandler {
     def handle(request: Request): IO[Unit]
