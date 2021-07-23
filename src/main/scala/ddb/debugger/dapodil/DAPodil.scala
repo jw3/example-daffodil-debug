@@ -334,7 +334,10 @@ object DAPodil extends IOApp {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   def run(args: List[String]): IO[ExitCode] =
-    CommandIOApp.run("DAPodil", "DAPOdil -- A DAP server for debugging Daffodil schema processors.")(opts.map(run), args)
+    CommandIOApp.run("DAPodil", "DAPOdil -- A DAP server for debugging Daffodil schema processors.")(
+      opts.map(run),
+      args
+    )
 
   def run(options: Options): IO[ExitCode] =
     for {
