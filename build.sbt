@@ -23,6 +23,9 @@ libraryDependencies := Seq(
   "org.typelevel" %% "log4cats-slf4j" % "2.1.0",
 )
 
+buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion, "daffodilVersion" -> daffodilVer)
+buildInfoPackage := "ddb.debugger"
+
 // portable config from the quickstart
 // http://www.scalafx.org/docs/quickstart/
 lazy val javaFXModules = {
@@ -40,4 +43,4 @@ lazy val javaFXModules = {
 }
 libraryDependencies ++= javaFXModules
 
-enablePlugins(GitVersioning, JavaAppPackaging, UniversalPlugin)
+enablePlugins(BuildInfoPlugin, GitVersioning, JavaAppPackaging, UniversalPlugin)

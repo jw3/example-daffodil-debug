@@ -13,6 +13,7 @@ import com.microsoft.java.debug.core.protocol.Requests._
 import com.microsoft.java.debug.core.protocol.Responses._
 import com.monovore.decline.Opts
 import com.monovore.decline.effect.CommandIOApp
+import ddb.debugger.BuildInfo
 import fs2._
 import fs2.concurrent.Signal
 import java.io._
@@ -333,14 +334,36 @@ object DAPodil extends IOApp {
 
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
+  val header =
+    s"""|
+        |******************************************************
+        |A DAP server for debugging Daffodil schema processors.
+        |
+        |Build info:
+        |  version: ${BuildInfo.version}
+        |  daffodilVersion: ${BuildInfo.daffodilVersion}
+        |  scalaVersion: ${BuildInfo.scalaVersion}
+        |  sbtVersion: ${BuildInfo.sbtVersion}
+        |******************************************************""".stripMargin
+
   def run(args: List[String]): IO[ExitCode] =
-    CommandIOApp.run("DAPodil", "DAPOdil -- A DAP server for debugging Daffodil schema processors.")(
+    CommandIOApp.run(
+      name = "DAPodil",
+      header = header,
+      version = Some(BuildInfo.version)
+    )(
       opts.map(run),
       args
     )
 
   def run(options: Options): IO[ExitCode] =
     for {
+      _ <- Logger[IO].info(header)
+      _ <- options match {
+        case Options(listenPort, listenTimeout) =>
+          Logger[IO].info(s"launched with options listenPort: $listenPort, listenTimeout: $listenTimeout")
+      }
+
       state <- Ref[IO].of[State](State.Uninitialized)
 
       address = new InetSocketAddress(options.listenPort)
