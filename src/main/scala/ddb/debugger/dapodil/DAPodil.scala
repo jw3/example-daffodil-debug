@@ -505,36 +505,9 @@ object DAPodil extends IOApp {
               Logger[IO].debug("awaiting first stack frame: got it")
           )
 
-          stoppedEventsDelivery = debugee.state
-            .collect {
-              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
-                new Events.StoppedEvent("entry", 1L)
-              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
-                new Events.StoppedEvent("pause", 1L)
-              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Step) =>
-                new Events.StoppedEvent("step", 1L)
-              case Debugee.State.Stopped(Debugee.State.Stopped.Reason.BreakpointHit(_)) =>
-                new Events.StoppedEvent("breakpoint", 1L)
-            }
-            .onFinalizeCase(ec => Logger[IO].debug(s"deliverStoppedEvents: $ec"))
-
-          dapEvents = debugee.events
-            .onFinalizeCase(ec => Logger[IO].debug(s"dapEvents: $ec"))
-
-          sourceEventsDelivery = debugee.sourceChanges
-            .map(source => DAPodil.LoadedSourceEvent("changed", source.toDAP))
-            .onFinalizeCase(ec => Logger[IO].debug(s"sourceEventsDelivery: $ec"))
-
-          eventDelivery = Stream(stoppedEventsDelivery, dapEvents, sourceEventsDelivery).parJoinUnbounded
-            .evalMap(session.sendEvent)
-            .onFinalize(
-              session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
-                session.sendEvent(new Events.TerminatedEvent())
-            )
-
           launched <- Stream
             .emit(Launched(debugee))
-            .concurrently(eventDelivery)
+            .concurrently(deliverEvents(debugee, session))
             .evalTap(_ => Logger[IO].debug("started Launched"))
             .compile
             .resource
@@ -543,6 +516,35 @@ object DAPodil extends IOApp {
 
           _ <- Resource.eval(session.sendEvent(new Events.ThreadEvent("started", 1L)))
         } yield launched
+    }
+
+    def deliverEvents(debugee: Debugee, session: DAPSession[Response, DebugEvent]): Stream[IO, Unit] = {
+      val stoppedEventsDelivery = debugee.state
+        .collect {
+          case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
+            new Events.StoppedEvent("entry", 1L)
+          case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Pause) =>
+            new Events.StoppedEvent("pause", 1L)
+          case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Step) =>
+            new Events.StoppedEvent("step", 1L)
+          case Debugee.State.Stopped(Debugee.State.Stopped.Reason.BreakpointHit(_)) =>
+            new Events.StoppedEvent("breakpoint", 1L)
+        }
+        .onFinalizeCase(ec => Logger[IO].debug(s"deliverStoppedEvents: $ec"))
+
+      val dapEvents = debugee.events
+        .onFinalizeCase(ec => Logger[IO].debug(s"dapEvents: $ec"))
+
+      val sourceEventsDelivery = debugee.sourceChanges
+        .map(source => DAPodil.LoadedSourceEvent("changed", source.toDAP))
+        .onFinalizeCase(ec => Logger[IO].debug(s"sourceEventsDelivery: $ec"))
+
+      Stream(stoppedEventsDelivery, dapEvents, sourceEventsDelivery).parJoinUnbounded
+        .evalMap(session.sendEvent)
+        .onFinalize(
+          session.sendEvent(new Events.ThreadEvent("exited", 1L)) *>
+            session.sendEvent(new Events.TerminatedEvent())
+        )
     }
 
     implicit val show: Show[State] = Show.fromToString
