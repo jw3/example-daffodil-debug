@@ -701,8 +701,7 @@ object Parse {
           control
             .await()
             .ifM( // if we are stepping, send events, otherwise no-op
-              setInfoset *>
-                setData,
+              setInfoset *> setData,
               IO.unit
             ) *>
           logger.debug("post-control await") *>
