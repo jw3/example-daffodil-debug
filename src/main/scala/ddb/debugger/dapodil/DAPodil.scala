@@ -49,7 +49,7 @@ object DAPSession {
 class DAPodil(
     session: DAPSession[Response, DebugEvent],
     state: Ref[IO, DAPodil.State],
-    hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resouce management
+    hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resource management
     debugee: Request => EitherNel[String, Resource[IO, DAPodil.Debugee]],
     whenDone: Deferred[IO, DAPodil.Done]
 ) extends DAPodil.RequestHandler {
