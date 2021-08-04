@@ -27,32 +27,77 @@ import scala.concurrent.duration._
 import logging._
 
 /** Communication interface to a DAP server while in a connected session. */
-trait DAPSession[R, E] {
-  def sendResponse(response: R): IO[Unit]
-  def sendEvent(event: E): IO[Unit]
+trait DAPSession[Req, Res, Ev] {
+  def requests: Stream[IO, Req]
+
+  def sendResponse(response: Res): IO[Unit]
+  def sendEvent(event: Ev): IO[Unit]
 }
 
 object DAPSession {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
-  def apply(server: AbstractProtocolServer): DAPSession[Response, DebugEvent] =
-    new DAPSession[Response, DebugEvent] {
+  def apply(server: AbstractProtocolServer, rs: Stream[IO, Request]): DAPSession[Request, Response, DebugEvent] =
+    new DAPSession[Request, Response, DebugEvent] {
+      def requests: Stream[IO, Request] = rs
+
       def sendResponse(response: Response): IO[Unit] =
         Logger[IO].info(show"<R $response") *> IO.blocking(server.sendResponse(response))
 
       def sendEvent(event: DebugEvent): IO[Unit] =
         Logger[IO].info(show"<E $event") *> IO.blocking(server.sendEvent(event))
     }
+
+  def resource(socket: Socket): Resource[IO, DAPSession[Request, Response, DebugEvent]] =
+    for {
+      dispatcher <- Dispatcher[IO]
+      requests <- Resource.eval(Queue.bounded[IO, Option[Request]](10))
+      server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requests)
+      session = DAPSession(server, Stream.fromQueueNoneTerminated(requests))
+    } yield session
+
+  /** Wraps an AbstractProtocolServer into an IO-based interface. */
+  class Server(
+      in: InputStream,
+      out: OutputStream,
+      dispatcher: Dispatcher[IO],
+      requests: QueueSink[IO, Option[Request]]
+  ) extends AbstractProtocolServer(in, out) {
+    def dispatchRequest(request: Request): Unit =
+      dispatcher.unsafeRunSync {
+        for {
+          _ <- Logger[IO].info(show"R> $request")
+          _ <- requests.offer(Some(request)).recoverWith {
+            case t => Logger[IO].error(t)(show"error during handling of request $request")
+          }
+        } yield ()
+      }
+  }
+
+  object Server {
+
+    /** Starts an `AbstractProtocolServer` for the lifetime of the resource, stopping it upon release. */
+    def resource(
+        in: InputStream,
+        out: OutputStream,
+        dispatcher: Dispatcher[IO],
+        requests: QueueSink[IO, Option[Request]]
+    ): Resource[IO, AbstractProtocolServer] =
+      Resource
+        .make(IO(new Server(in, out, dispatcher, requests)))(server => IO(server.stop()) *> requests.offer(None).void)
+        .flatTap(server => IO.blocking(server.run).background)
+  }
+
 }
 
 /** Connect a debugee to an external debugger via DAP. */
 class DAPodil(
-    session: DAPSession[Response, DebugEvent],
+    session: DAPSession[Request, Response, DebugEvent],
     state: Ref[IO, DAPodil.State],
     hotswap: Hotswap[IO, DAPodil.State], // manages those states that have their own resource management
     debugee: Request => EitherNel[String, Resource[IO, DAPodil.Debugee]],
     whenDone: Deferred[IO, DAPodil.Done]
-) extends DAPodil.RequestHandler {
+) {
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
   /** Extension methods to create responses from requests. */
@@ -81,6 +126,9 @@ class DAPodil(
         command -> JsonUtils.fromJson(request.arguments, command.getArgumentType())
       }
   }
+
+  def handleRequests: Stream[IO, Unit] =
+    session.requests.evalMap(handle)
 
   /** Respond to requests and optionally update the current state. */
   def handle(request: Request): IO[Unit] =
@@ -390,65 +438,37 @@ object DAPodil extends IOApp {
       socket <- IO.blocking(socket.accept())
       _ <- Logger[IO].info(s"connected at $uri")
 
-      done <- DAPodil
-        .resource(socket, Parse.debugee)
+      done <- DAPSession
+        .resource(socket)
+        .flatMap(session => DAPodil.resource(session, Parse.debugee))
         .use(whenDone => whenDone <* Logger[IO].debug("whenDone: completed"))
-      _ <- Logger[IO].info(s"disconnected at $uri")
+
+        _ <- Logger[IO].info(s"disconnected at $uri")
     } yield done
 
-  /** Returns a resource that launches the "DAPodil" debugger that listens on a socket, returning an effect that waits until the debugger stops or the socket closes. */
-  def resource(socket: Socket, debugee: Request => EitherNel[String, Resource[IO, Debugee]]): Resource[IO, IO[Done]] =
+  /** Returns a resource that launches the "DAPodil" debugger given a DAP session, returning an effect that waits until the debugger stops or the session ends. */
+  def resource(
+      session: DAPSession[Request, Response, DebugEvent],
+      debugee: Request => EitherNel[String, Resource[IO, Debugee]]
+  ): Resource[IO, IO[Done]] =
     for {
-      dispatcher <- Dispatcher[IO]
-      requestHandler <- Resource.eval(Deferred[IO, RequestHandler])
-      server <- Server.resource(socket.getInputStream, socket.getOutputStream, dispatcher, requestHandler)
       state <- Resource.eval(Ref[IO].of[State](State.Uninitialized))
       hotswap <- Hotswap.create[IO, State].onFinalizeCase(ec => Logger[IO].debug(s"hotswap: $ec"))
       whenDone <- Resource.eval(Deferred[IO, Done])
-      dapodil = new DAPodil(DAPSession(server), state, hotswap, debugee, whenDone)
-      _ <- Resource.eval(requestHandler.complete(dapodil))
+      dapodil = new DAPodil(
+        session,
+        state,
+        hotswap,
+        debugee,
+        whenDone
+      )
+      _ <- dapodil.handleRequests.compile.lastOrError.background
+
     } yield whenDone.get
 
   case class Done(restart: Boolean = false)
 
   case class Options(listenPort: Int, listenTimeout: Duration)
-
-  trait RequestHandler {
-    def handle(request: Request): IO[Unit]
-  }
-
-  /** Wraps an AbstractProtocolServer into an IO-based interface. */
-  class Server(
-      in: InputStream,
-      out: OutputStream,
-      dispatcher: Dispatcher[IO],
-      requestHandler: Deferred[IO, RequestHandler]
-  ) extends AbstractProtocolServer(in, out) {
-    def dispatchRequest(request: Request): Unit =
-      dispatcher.unsafeRunSync {
-        for {
-          _ <- Logger[IO].info(show"R> $request")
-          handler <- requestHandler.get
-          _ <- handler.handle(request).recoverWith {
-            case t => Logger[IO].error(t)(show"error during handling of request $request")
-          }
-        } yield ()
-      }
-  }
-
-  object Server {
-
-    /** Starts an `AbstractProtocolServer` for the lifetime of the resource, stopping it upon release. */
-    def resource(
-        in: InputStream,
-        out: OutputStream,
-        dispatcher: Dispatcher[IO],
-        requestHandler: Deferred[IO, RequestHandler]
-    ): Resource[IO, AbstractProtocolServer] =
-      Resource
-        .make(IO(new Server(in, out, dispatcher, requestHandler)))(server => IO(server.stop()))
-        .flatTap(server => IO.blocking(server.run).background)
-  }
 
   /** DAPodil launches the debugee which reports its state and handles debug commands. */
   trait Debugee {
@@ -516,7 +536,7 @@ object DAPodil extends IOApp {
 
     object Launched {
       def resource(
-          session: DAPSession[Response, DebugEvent],
+          session: DAPSession[Request, Response, DebugEvent],
           debugee: Resource[IO, Debugee]
       ): Resource[IO, Launched] =
         for {
@@ -541,7 +561,7 @@ object DAPodil extends IOApp {
         } yield launched
     }
 
-    def deliverEvents(debugee: Debugee, session: DAPSession[Response, DebugEvent]): Stream[IO, Unit] = {
+    def deliverEvents(debugee: Debugee, session: DAPSession[Request, Response, DebugEvent]): Stream[IO, Unit] = {
       val stoppedEventsDelivery = debugee.state
         .collect {
           case Debugee.State.Stopped(Debugee.State.Stopped.Reason.Entry) =>
