@@ -230,13 +230,7 @@ object Parse {
       breakpoints <- Resource.eval(Breakpoints())
       infoset <- Resource.eval(Queue.bounded[IO, Option[String]](10))
       dataDump <- Resource.eval(Queue.bounded[IO, Option[String]](10))
-
-      // ensure `control` and `state` agree: initial `state` element; `control` running vs. paused
-      control <- Resource.eval(Control.stopped()).evalTap { stoppedControl =>
-        if (args.stopOnEntry)
-          state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Entry)))
-        else stoppedControl.continue() *> state.offer(Some(DAPodil.Debugee.State.Running))
-      }
+      control <- Resource.eval(Control.stopped())
 
       latestData <- Stream.fromQueueNoneTerminated(data).holdResource(DAPodil.Data.empty)
 
@@ -257,20 +251,6 @@ object Parse {
         dataDumpChanges.as(dataDumpSource).onFinalizeCase(ec => Logger[IO].debug(s"dataDumpChanges: $ec"))
       ).parJoinUnbounded
         .onFinalizeCase(ec => Logger[IO].debug(s"sourceChanges: $ec"))
-
-      debugee = new Debugee(
-        DAPodil.Source(args.schemaPath, None),
-        DAPodil.Source(args.dataPath, None),
-        latestInfoset,
-        latestDataDump,
-        sourceChanges,
-        latestData,
-        Stream.fromQueueNoneTerminated(state),
-        state,
-        Stream.fromQueueNoneTerminated(dapEvents),
-        breakpoints,
-        control
-      )
 
       events <- Resource.eval(Queue.bounded[IO, Option[Event]](10))
       debugger <- DaffodilDebugger
@@ -299,16 +279,35 @@ object Parse {
       deliverParseData = Stream
         .fromQueueNoneTerminated(events)
         .evalTap {
-          case start: Event.StartElement => dapEvents.offer(Some(DataEvent(start.state.currentLocation.bytePos1b)))
-          case _                         => IO.unit
+          case start: Event.StartElement if start.isStepping =>
+            dapEvents.offer(Some(DataEvent(start.state.currentLocation.bytePos1b)))
+          case _ => IO.unit
         }
         .through(fromParse(nextFrameId, nextRef))
         .enqueueNoneTerminated(data)
+
+      debugee = new Debugee(
+        DAPodil.Source(args.schemaPath, None),
+        DAPodil.Source(args.dataPath, None),
+        latestInfoset,
+        latestDataDump,
+        sourceChanges,
+        latestData,
+        Stream.fromQueueNoneTerminated(state),
+        state,
+        Stream.fromQueueNoneTerminated(dapEvents),
+        breakpoints,
+        control
+      )
+      startup = if (args.stopOnEntry)
+        control.step() *> state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Entry))) // don't use debugee.step as we need to send Stopped.Reason.Entry, not Stopped.Reason.Step
+      else debugee.continue()
 
       _ <- Stream
         .emit(debugee)
         .concurrently(
           Stream(
+            Stream.eval(startup),
             infosetWriting.onFinalizeCase(ec => Logger[IO].debug(s"infosetWriting: $ec")),
             deliverParseData.onFinalizeCase(ec => Logger[IO].debug(s"deliverParseData: $ec"))
           ).parJoinUnbounded
@@ -509,11 +508,34 @@ object Parse {
     case class Init(state: StateForDebugger) extends Event
     case class StartElement(
         state: StateForDebugger,
+        isStepping: Boolean,
         name: Option[ElementName],
         schemaLocation: SchemaFileLocation,
         pointsOfUncertainty: List[PointOfUncertainty],
         delimiterStack: List[Delimiter]
-    ) extends Event
+    ) extends Event {
+      // PState is mutable, so we copy all the information we might need downstream.
+      def this(pstate: PState, isStepping: Boolean) =
+        this(
+          pstate.copyStateForDebugger,
+          isStepping,
+          pstate.currentNode.toScalaOption.map(element => ElementName(element.name)),
+          pstate.schemaFileLocation,
+          pstate.pointsOfUncertainty.iterator.toList.map(mark =>
+            PointOfUncertainty(
+              Option(mark.disMark).as(mark.bitPos0b),
+              mark.context.schemaFileLocation,
+              ElementName(mark.element.name),
+              mark.context.toString()
+            )
+          ),
+          pstate.mpstate.delimiters.toList.zipWithIndex.map {
+            case (delimiter, i) =>
+              println(s"$i: $delimiter")
+              Delimiter(if (i < pstate.mpstate.delimitersLocalIndexStack.top) "remote" else "local", delimiter)
+          }
+        )
+    }
     case class EndElement(state: StateForDebugger) extends Event
     case object Fini extends Event
 
@@ -575,34 +597,40 @@ object Parse {
   }
 
   object Control {
+    implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
     sealed trait State
+    case class AwaitingFirstAwait(waiterArrived: Deferred[IO, Unit]) extends State
     case object Running extends State
     case class Stopped(whenContinued: Deferred[IO, Unit], nextAwaitStarted: Deferred[IO, Unit]) extends State
 
     /** Create a control initialized to the `Stopped` state. */
     def stopped(): IO[Control] =
       for {
-        whenContinued <- Deferred[IO, Unit]
-        nextAwaitStarted <- Deferred[IO, Unit]
-        state <- Ref[IO].of[State](Stopped(whenContinued, nextAwaitStarted))
+        waiterArrived <- Deferred[IO, Unit]
+        state <- Ref[IO].of[State](AwaitingFirstAwait(waiterArrived))
       } yield new Control {
         def await(): IO[Boolean] =
-          state.get.flatMap {
-            case Running => IO.pure(false)
-            case Stopped(whenContinued, nextAwaitStarted) =>
-              nextAwaitStarted.complete(()) *> // signal next await happened
-                Logger[IO].debug("waiting to be continued...") *>
-                whenContinued.get.as(true) *> // block
-                Logger[IO].debug("... continued").as(true)
-          }
+          for {
+            nextContinue <- Deferred[IO, Unit]
+            nextAwaitStarted <- Deferred[IO, Unit]
+            awaited <- state.modify {
+              case AwaitingFirstAwait(waiterArrived) =>
+                Stopped(nextContinue, nextAwaitStarted) -> waiterArrived.complete(()) *> nextContinue.get.as(true)
+              case Running => Running -> IO.pure(false)
+              case s @ Stopped(whenContinued, nextAwaitStarted) =>
+                s -> nextAwaitStarted.complete(()) *> // signal next await happened
+                  whenContinued.get.as(true) // block
+            }.flatten
+          } yield awaited
 
         def step(): IO[Unit] =
           for {
             nextContinue <- Deferred[IO, Unit]
             nextAwaitStarted <- Deferred[IO, Unit]
             _ <- state.modify {
-              case Running => Running -> IO.unit
+              case s @ AwaitingFirstAwait(waiterArrived) => s -> waiterArrived.get *> step
+              case Running                               => Running -> IO.unit
               case Stopped(whenContinued, _) =>
                 Stopped(nextContinue, nextAwaitStarted) -> (
                   whenContinued.complete(()) *> // wake up await-ers
@@ -613,7 +641,8 @@ object Parse {
 
         def continue(): IO[Unit] =
           state.modify {
-            case Running => Running -> IO.unit
+            case s @ AwaitingFirstAwait(waiterArrived) => s -> waiterArrived.get *> continue
+            case Running                               => Running -> IO.unit
             case Stopped(whenContinued, _) =>
               Running -> whenContinued.complete(()).void // wake up await-ers
           }.flatten
@@ -623,8 +652,9 @@ object Parse {
             nextContinue <- Deferred[IO, Unit]
             nextAwaitStarted <- Deferred[IO, Unit]
             _ <- state.update {
-              case Running    => Stopped(nextContinue, nextAwaitStarted)
-              case s: Stopped => s
+              case Running               => Stopped(nextContinue, nextAwaitStarted)
+              case s: AwaitingFirstAwait => s
+              case s: Stopped            => s
             }
           } yield ()
       }
@@ -644,6 +674,7 @@ object Parse {
       infoset: QueueSink[IO, Option[String]],
       dataDump: QueueSink[IO, Option[String]]
   ) extends Debugger {
+    implicit val logger: Logger[IO] = Slf4jLogger.getLogger
 
     override def init(pstate: PState, processor: Parser): Unit =
       dispatcher.unsafeRunSync {
@@ -664,24 +695,7 @@ object Parse {
 
     override def startElement(pstate: PState, processor: Parser): Unit =
       dispatcher.unsafeRunSync {
-        val push = Event.StartElement(
-          pstate.copyStateForDebugger,
-          pstate.currentNode.toScalaOption.map(element => ElementName(element.name)),
-          pstate.schemaFileLocation,
-          pstate.pointsOfUncertainty.iterator.toList.map(mark =>
-            PointOfUncertainty(
-              Option(mark.disMark).as(mark.bitPos0b),
-              mark.context.schemaFileLocation,
-              ElementName(mark.element.name),
-              mark.context.toString()
-            )
-          ),
-          pstate.mpstate.delimiters.toList.zipWithIndex.map {
-            case (delimiter, i) =>
-              println(s"$i: $delimiter")
-              Delimiter(if (i < pstate.mpstate.delimitersLocalIndexStack.top) "remote" else "local", delimiter)
-          }
-        )
+        // Generating the infoset requires a PState, not a StateForDebugger, so we can't generate it later from the Event.StartElement (which contains the StateForDebugger).
         val setInfoset = {
           var node = pstate.infoset
           while (node.diParent != null) node = node.diParent
@@ -691,20 +705,18 @@ object Parse {
           }
         }
 
+        // Data dump code from Daffodil requires a PState, not a StateForDebugger, so we can't generate it later from the Event.StartElement (which contains the StateForDebugger).
         val setData =
           dataDump(pstate).flatMap(dump => dump.traverse(dump => dataDump.offer(Some(dump))))
 
-        logger.debug("pre-offer") *>
-          events.offer(Some(push)) *>
-          logger.debug("pre-checkBreakpoints") *>
+        logger.debug("pre-checkBreakpoints") *>
           checkBreakpoints(createLocation(pstate.schemaFileLocation)) *>
           logger.debug("pre-control await") *>
           // may block until external control says to unblock, for stepping behavior
-          control
-            .await()
-            .ifM( // if we are stepping, send events, otherwise no-op
-              setInfoset *> setData,
-              IO.unit
+          control.await
+            .ifM(
+              events.offer(Some(new Event.StartElement(pstate, isStepping = true))) *> setInfoset *> setData,
+              events.offer(Some(new Event.StartElement(pstate, isStepping = false)))
             ) *>
           logger.debug("post-control await") *>
           previousState.set(Some(pstate.copyStateForDebugger))
