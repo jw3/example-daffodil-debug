@@ -33,6 +33,7 @@ trait Parse {
   /** Run the parse, returning the bytes of the final infoset. */
   def run(): Stream[IO, Byte]
 
+  /** Request the active parse to stop. */
   def close(): IO[Unit]
 }
 
@@ -294,6 +295,7 @@ object Parse {
       nextFrameId <- Resource.eval(Next.int.map(_.map(DAPodil.Frame.Id.apply)).flatTap(_.next())) // `.flatTap(_.next())`: ids start at 1
       nextRef <- Resource.eval(Next.int.map(_.map(DAPodil.VariablesReference.apply)).flatTap(_.next())) // `.flatTap(_.next())`: ids start at 1
 
+      // convert Parse.Event values to DAPodil.Data values
       deliverParseData = Stream
         .fromQueueNoneTerminated(events)
         .evalTap {
@@ -727,6 +729,7 @@ object Parse {
         prestate.map(p => p.currentLocation.asInstanceOf[DataLoc].dump(None, p.currentLocation, state) + "\n")
       }
 
+    /** If the current location is a breakpoint, pause the control and update the state to notify the breakpoint was hit. */
     def checkBreakpoints(location: DAPodil.Location): IO[Unit] =
       breakpoints
         .shouldBreak(location)
