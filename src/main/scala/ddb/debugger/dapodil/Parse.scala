@@ -299,9 +299,12 @@ object Parse {
         breakpoints,
         control
       )
-      startup = if (args.stopOnEntry)
-        control.step() *> state.offer(Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Entry))) // don't use debugee.step as we need to send Stopped.Reason.Entry, not Stopped.Reason.Step
-      else debugee.continue()
+      startup = dapEvents.offer(Some(ConfigEvent(args))) *>
+        (if (args.stopOnEntry)
+           control.step() *> state.offer(
+             Some(DAPodil.Debugee.State.Stopped(DAPodil.Debugee.State.Stopped.Reason.Entry))
+           ) // don't use debugee.step as we need to send Stopped.Reason.Entry, not Stopped.Reason.Step
+         else debugee.continue())
 
       _ <- Stream
         .emit(debugee)
@@ -573,6 +576,49 @@ object Parse {
       }
   }
 
+  case class ConfigEvent(launchArgs: ConfigEvent.LaunchArgs, buildInfo: ConfigEvent.BuildInfo)
+      extends Events.DebugEvent("daffodil.config")
+  object ConfigEvent {
+    case class LaunchArgs(schemaPath: String, dataPath: String, stopOnEntry: Boolean, infosetOutput: InfosetOutput)
+
+    sealed trait InfosetOutput {
+      val `type`: String =
+        this match {
+          case InfosetOutput.None    => "none"
+          case InfosetOutput.Console => "console"
+          case InfosetOutput.File(_) => "file"
+        }
+    }
+    object InfosetOutput {
+      case object None extends InfosetOutput
+      case object Console extends InfosetOutput
+      case class File(path: String) extends InfosetOutput
+
+      def apply(that: Debugee.LaunchArgs.InfosetOutput): InfosetOutput =
+        that match {
+          case Debugee.LaunchArgs.InfosetOutput.None       => None
+          case Debugee.LaunchArgs.InfosetOutput.Console    => Console
+          case Debugee.LaunchArgs.InfosetOutput.File(path) => File(path.toString)
+        }
+    }
+
+    case class BuildInfo(version: String, daffodilVersion: String, scalaVersion: String)
+
+    def apply(launchArgs: Debugee.LaunchArgs): ConfigEvent =
+      ConfigEvent(
+        LaunchArgs(
+          launchArgs.schemaPath.toString,
+          launchArgs.dataPath.toString(),
+          launchArgs.stopOnEntry,
+          InfosetOutput(launchArgs.infosetOutput)
+        ),
+        BuildInfo(
+          ddb.debugger.BuildInfo.version,
+          ddb.debugger.BuildInfo.daffodilVersion,
+          ddb.debugger.BuildInfo.scalaVersion
+        )
+      )
+  }
   case class DataEvent(bytePos1b: Long) extends Events.DebugEvent("daffodil.data")
   case class InfosetEvent(content: String, mimeType: String) extends Events.DebugEvent("daffodil.infoset")
 
