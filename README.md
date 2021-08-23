@@ -4,7 +4,6 @@ daffodil debugger experiments
 Experiments with the Daffodil debugging interface and the Debug Adapter Protocol (DAP).
 
 ### examples
-- [DAPodil debug adapter](src/main/scala/ddb/debugger/dapodil)
 - [Standalone debugger](src/main/scala/ddb/debugger/z)
 
 ### requires
