@@ -1,6 +1,10 @@
 daffodil debugger experiments
 ===
 
+**Archived**:  See the dapodil code in the example extension repo at https://github.com/jw3/example-daffodil-vscode
+
+---
+
 Experiments with the Daffodil debugging interface and the Debug Adapter Protocol (DAP).
 
 ### examples
@@ -9,7 +13,7 @@ Experiments with the Daffodil debugging interface and the Debug Adapter Protocol
 
 ### requires
 - jdk >= 11
-- Daffodil 3.1.0 snapshot
+- Daffodil 3.1.0
 
 ### reference
 - https://microsoft.github.io/debug-adapter-protocol
